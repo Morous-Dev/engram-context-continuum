@@ -58,10 +58,11 @@ const MODELS = [
     // GPU-then-CPU fallback is handled inside tier3b.ts; the test uses the
     // same prompt as production.
     noThink:   true,
-    // Qwen 3.5 2B has a disproportionately large KV cache per token.
-    // Binary search confirmed: FAILS at 1024, WORKS at 768. Max GPU ctx = 768.
-    // Try 768 first; if that still fails (different GPU), try 512 before CPU.
-    gpuCtxSizes: [768, 512],
+    // node-llama-cpp's VRAM estimator over-estimates KV cache for Qwen 3.5's
+    // hybrid DeltaNet/GQA architecture, causing false rejection at ≥1024 ctx
+    // on RTX 5060 Ti (Blackwell SM_120). ignoreMemorySafetyChecks bypasses the
+    // estimator; actual allocation succeeds at 4096 ctx (~2.5 GB VRAM used).
+    ignoreMemorySafetyChecks: true,
   },
 ];
 
@@ -219,39 +220,29 @@ async function runSingleModel(modelId) {
   let loadError = null;
   let mode = 'unknown';
 
-  // Context sizes to try on GPU (in order). Qwen 3.5 2B has a large KV cache
-  // and fails at ≥1024 even with ample VRAM — 768 is the confirmed max.
-  // Other models try 4096 first (standard); if that fails, fall through to CPU.
-  const gpuContextSizes = modelDef.gpuCtxSizes ?? [4096];
+  // Attempt 1: GPU inference
+  // ignoreMemorySafetyChecks bypasses the VRAM estimator for models (e.g. Qwen
+  // 3.5 2B) whose architecture causes the estimator to wildly over-estimate.
+  const ctxOpts = { contextSize: 4096, ...(modelDef.ignoreMemorySafetyChecks ? { ignoreMemorySafetyChecks: true } : {}) };
+  try {
+    llama   = await llamaCpp.getLlama();
+    model   = await llama.loadModel({ modelPath });
+    ctx     = await model.createContext(ctxOpts);
+    session = new llamaCpp.LlamaChatSession({ contextSequence: ctx.getSequence() });
+    mode    = 'GPU (4096 ctx)';
+    process.stderr.write(`  Mode: GPU inference (4096 ctx)\n`);
+  } catch (gpuErr) {
+    loadError = gpuErr;
+    const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr).toLowerCase();
+    try { await ctx?.dispose(); } catch { /* ignore */ }
+    try { await model?.dispose(); } catch { /* ignore */ }
+    try { await llama?.dispose(); } catch { /* ignore */ }
+    ctx = model = llama = session = null;
 
-  for (const ctxSize of gpuContextSizes) {
-    try {
-      llama   = await llamaCpp.getLlama();
-      model   = await llama.loadModel({ modelPath });
-      ctx     = await model.createContext({ contextSize: ctxSize });
-      session = new llamaCpp.LlamaChatSession({ contextSequence: ctx.getSequence() });
-      mode    = `GPU (${ctxSize} ctx)`;
-      process.stderr.write(`  Mode: GPU inference (${ctxSize} ctx)\n`);
-      loadError = null;
-      break; // success — stop trying smaller sizes
-    } catch (gpuErr) {
-      loadError = gpuErr;
-      const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr).toLowerCase();
-      try { await ctx?.dispose(); } catch { /* ignore */ }
-      try { await model?.dispose(); } catch { /* ignore */ }
-      try { await llama?.dispose(); } catch { /* ignore */ }
-      ctx = model = llama = session = null;
-
-      if (!(msg.includes('vram') || msg.includes('too large'))) break; // non-VRAM error, stop retrying
-      process.stderr.write(`  GPU ctx ${ctxSize} failed (VRAM): ${String(gpuErr instanceof Error ? gpuErr.message : gpuErr).slice(0, 120)}\n`);
-    }
-  }
-
-  // Attempt 2 (final fallback): CPU-only inference
-  if (!session && loadError) {
-    const msg = String(loadError instanceof Error ? loadError.message : loadError).toLowerCase();
-    if (msg.includes('vram') || msg.includes('too large')) {
-      process.stderr.write(`  GPU exhausted — falling back to CPU inference\n`);
+    // Attempt 2: CPU-only fallback for genuine VRAM-constrained machines
+    if (msg.includes('vram') || msg.includes('too large') || msg.includes('out of memory')) {
+      process.stderr.write(`  GPU error: ${String(gpuErr instanceof Error ? gpuErr.message : gpuErr).slice(0, 200)}\n`);
+      process.stderr.write(`  GPU VRAM insufficient — falling back to CPU inference\n`);
       try {
         llama   = await llamaCpp.getLlama({ gpu: false });
         model   = await llama.loadModel({ modelPath });

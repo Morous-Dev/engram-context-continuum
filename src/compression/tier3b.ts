@@ -7,17 +7,21 @@
  * and intent extraction. Smaller than tier3 (1.44 GB vs 2.32 GB) and suitable
  * for machines with limited GPU VRAM.
  *
- * GPU strategy: tries GPU inference first with a reduced context size (768 tokens)
- * for speed. Qwen 3.5 2B has a disproportionately large KV cache per token —
- * on a 16 GB VRAM GPU it fails at contextSize≥1024 despite ample free VRAM.
- * Binary search confirmed max working GPU context: 768 tokens. If the GPU load
- * still fails (error contains "vram" or "too large"), retries with gpu:false for
- * CPU-only inference at full 4096 context. CPU is slower (~1-3 min) but works
- * on any machine regardless of GPU VRAM.
+ * GPU strategy: tries GPU inference at full 4096 context with
+ * ignoreMemorySafetyChecks:true. Qwen 3.5 2B's hybrid DeltaNet/GQA architecture
+ * causes node-llama-cpp's VRAM estimator to over-estimate KV cache by 10-100×,
+ * triggering false "too large" rejections at ≥1024 ctx despite 15+ GB free VRAM
+ * on RTX 5060 Ti (Blackwell SM_120). The bypass lets the actual CUDA allocator
+ * decide — a 2B model at 4096 ctx actually uses ~2.5 GB total, well within VRAM.
+ * If the GPU load still genuinely fails, retries with gpu:false for CPU-only
+ * inference. CPU is slower (~1-3 min) but always works.
+ *
+ * Root cause research: node-llama-cpp issue #435, llama.cpp Qwen3.5 arch issues
+ * #19879/#19858, and confirmed VRAM reporting quirk on RTX 50-series Blackwell.
  *
  * Model file: qwen3.5-2b-q5_k_m.gguf (~1.44 GB)
  * Location:   ~/.engram-cc/models/
- * RAM needed:  ~2 GB free (CPU), or GPU with ≥1 GB VRAM (768-token context)
+ * RAM needed:  ~2.5 GB VRAM (GPU) or ~2 GB RAM (CPU)
  *
  * Note: Qwen 3.5 2B has a thinking mode (generates <think>...</think> blocks).
  * The prompt includes /no_think to disable it for fast, direct summarization.
@@ -90,7 +94,7 @@ interface LlamaInstance {
   dispose(): Promise<void>;
 }
 interface LlamaModel {
-  createContext(opts?: { contextSize?: number }): Promise<LlamaContext>;
+  createContext(opts?: { contextSize?: number; ignoreMemorySafetyChecks?: boolean }): Promise<LlamaContext>;
   dispose(): Promise<void>;
 }
 interface LlamaContext {
@@ -144,11 +148,10 @@ export class Tier3bCompressor implements Compressor {
   /**
    * Lazily load the Qwen 3.5 2B model via node-llama-cpp.
    *
-   * GPU strategy: Qwen 3.5 2B has an unusually large KV cache per token.
-   * On a 16 GB VRAM GPU it fails at contextSize≥1024. Binary search confirmed
-   * 768 is the maximum working GPU context on this hardware. We use 768 on GPU
-   * for fast (~500ms) inference. If the GPU load still fails (VRAM or "too
-   * large" error), we fall back to CPU at full 4096 context (~1-3 min).
+   * GPU strategy: uses ignoreMemorySafetyChecks:true to bypass the VRAM
+   * estimator, which over-estimates KV cache for Qwen 3.5's hybrid
+   * DeltaNet/GQA architecture and falsely rejects ≥1024 ctx on Blackwell GPUs.
+   * If the actual CUDA allocation fails (genuine OOM), falls back to CPU.
    */
   private getOrLoadSession(): Promise<LlamaChatSessionInstance | null> {
     if (!this.loadPromise) {
@@ -157,21 +160,22 @@ export class Tier3bCompressor implements Compressor {
         try {
           const llamaCpp = await import("node-llama-cpp") as unknown as NodeLlamaCppModule;
 
-          // Attempt 1: GPU inference at reduced context (768 max for Qwen 3.5 2B KV cache)
-          // Qwen's KV cache is disproportionately large — 1024+ context exceeds VRAM budget
-          // even with ample free VRAM. 768 is the confirmed maximum GPU context size.
+          // Attempt 1: GPU at full context, bypassing the VRAM estimator.
+          // The estimator wrongly rejects Qwen 3.5 2B at ≥1024 ctx on RTX 5060 Ti
+          // (Blackwell SM_120) due to its hybrid DeltaNet architecture not being
+          // accounted for. Actual GPU usage is ~2.5 GB — well within 16 GB VRAM.
           try {
             this.llama = await llamaCpp.getLlama();
             this.model = await this.llama.loadModel({ modelPath: this.modelPath });
-            this.ctx   = await this.model.createContext({ contextSize: 768 });
+            this.ctx   = await this.model.createContext({ contextSize: 4096, ignoreMemorySafetyChecks: true });
             return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx.getSequence() });
           } catch (gpuErr) {
             const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr).toLowerCase();
-            const isVramError = msg.includes("vram") || msg.includes("too large");
+            const isVramError = msg.includes("vram") || msg.includes("too large") || msg.includes("out of memory");
             if (!isVramError) throw gpuErr; // Not a VRAM issue — propagate
 
             // Attempt 2: CPU-only inference (slower but works with any GPU/RAM config)
-            console.error(`[EngramCC:tier3b] GPU context unavailable, falling back to CPU inference`);
+            console.error(`[EngramCC:tier3b] GPU allocation failed, falling back to CPU inference`);
             try { await this.ctx?.dispose(); } catch { /* ignore */ }
             try { await this.model?.dispose(); } catch { /* ignore */ }
             try { await this.llama?.dispose(); } catch { /* ignore */ }
