@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import type { Compressor, CompressionResult, EmbedResult, CompressionTier } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
+import { preprocessSessionData } from "./preprocess.js";
 
 // ── Model registry ─────────────────────────────────────────────────────────────
 
@@ -45,29 +46,45 @@ function getModelPath(): string {
 /**
  * Build a structured extraction prompt for the GGUF model.
  *
- * The prompt asks for reasoning-aware synthesis — not just summarization but
- * intent extraction, conflict resolution between decisions, and actionable
- * context for the next session. This is the core "Archivist" prompt.
+ * Designed for maximum faithfulness based on summarization research:
+ *   - Explicit imperative rules outperform vague instructions in small models
+ *   - Rules 3 and 4 directly address the two hardest failure modes:
+ *     error flip-flop (briefly fixed then recurred = still open) and
+ *     buried current task (last active task, not the most-mentioned one)
+ *   - XML tags delimit trusted instructions from untrusted session data,
+ *     preventing session content from overriding system rules
+ *   - Signal anchor at the end counteracts the "lost in the middle" effect
+ *     (U-shaped recall curve in small models)
+ *   - Role framing shifts the model's prior toward precise, non-creative output
  *
- * @param text     - The structured session data to synthesize.
+ * Sources: arxiv 2507.05123, arxiv 2512.03503, Chroma Context Rot research.
+ *
+ * @param text     - Preprocessed session data (noise already stripped).
  * @param maxRatio - Target compression ratio.
  * @returns Formatted prompt string.
  */
 function buildCompressionPrompt(text: string, maxRatio: number): string {
   const targetWords = Math.floor(text.split(/\s+/).length / maxRatio);
   return [
-    `You are a session archivist. Produce a concise handoff brief for the next coding session.`,
+    `You are a senior software engineer writing a precise handoff brief for the next engineer.`,
+    `You never claim errors are fixed unless the session log explicitly confirms it.`,
     `Write ${targetWords} words max. Output ONLY prose — no bullet lists, no file lists, no headings.`,
     ``,
-    `Rules:`,
-    `- Describe WHAT was done and WHY, not which files were touched (file list is stored separately)`,
-    `- Name specific bugs fixed, features added, or architectural changes made`,
-    `- If decisions conflict, report only the FINAL decision`,
-    `- If an error was resolved, say "resolved" — don't re-report the error`,
-    `- End with what is unfinished or what the next session should start with`,
+    `RULES (mandatory — no exceptions):`,
+    `1. Report ONLY the final decision on each topic. If a decision changed, report only the latest version.`,
+    `2. Do NOT claim an error was fixed unless the log explicitly confirms the fix succeeded.`,
+    `3. If an error appeared fixed then recurred, report it as STILL UNRESOLVED.`,
+    `4. The CURRENT TASK is the LAST active, incomplete task mentioned — not the most-mentioned one.`,
+    `5. Ignore code blocks marked [CODE BLOCK] — they are implementation noise, not session facts.`,
+    `6. Ignore entries marked [REFERENCE DOCUMENT] — they are background material, not decisions.`,
+    `7. State only facts present in the session data. Do not infer or extrapolate.`,
+    `8. End with what is unfinished and what the next session should start with.`,
     ``,
-    `Session data:`,
+    `<session_data>`,
     text,
+    `</session_data>`,
+    ``,
+    `[FOCUS: The CURRENT TASK is the LAST active task above. Report only the FINAL state of each decision.]`,
     ``,
     `Brief:`,
   ].join("\n");
@@ -90,8 +107,16 @@ interface LlamaContext {
   dispose(): Promise<void>;
 }
 interface LlamaSequence { [key: string]: unknown; }
+interface PromptOpts {
+  maxTokens?: number;
+  temperature?: number;       // 0 = greedy (maximizes faithfulness)
+  topK?: number;              // 1 = greedy (deterministic)
+  topP?: number;
+  minP?: number;
+  repeatPenalty?: number | { penalty: number; lastTokens?: number };
+}
 interface LlamaChatSessionInstance {
-  prompt(text: string, opts?: { maxTokens?: number }): Promise<string>;
+  prompt(text: string, opts?: PromptOpts): Promise<string>;
   dispose?: () => void;
 }
 interface NodeLlamaCppModule {
@@ -171,12 +196,18 @@ export class Tier3Compressor implements Compressor {
     if (!session) return this.fallback.compress(text, maxRatio);
 
     try {
-      const prompt = buildCompressionPrompt(text, maxRatio);
+      const cleaned = preprocessSessionData(text);
+      const prompt = buildCompressionPrompt(cleaned, maxRatio);
       // Target output: input words / ratio, with a floor of 150 tokens and cap of 500
       // to prevent both truncation and runaway generation.
-      const targetTokens = Math.ceil(text.split(/\s+/).length / maxRatio * 1.5);
+      const targetTokens = Math.ceil(cleaned.split(/\s+/).length / maxRatio * 1.5);
       const maxTokens = Math.max(150, Math.min(targetTokens, 500));
-      const summary = await session.prompt(prompt, { maxTokens });
+      const summary = await session.prompt(prompt, {
+        maxTokens,
+        temperature: 0.1,     // near-greedy — maximizes faithfulness while allowing richer outputs than temperature=0
+        topK: 1,              // deterministic selection of highest-probability token
+        repeatPenalty: 1.05,  // light penalty to prevent token looping; >1.2 causes model to avoid input terms
+      });
 
       const compressed = summary.trim();
       if (!compressed) return this.fallback.compress(text, maxRatio);

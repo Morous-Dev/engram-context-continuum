@@ -61,18 +61,25 @@ function buildPrompt(sessionData) {
   const wordCount = sessionData.split(/\s+/).length;
   const targetWords = Math.floor(wordCount / 3);
   return [
-    `You are a session archivist. Produce a concise handoff brief for the next coding session.`,
+    `You are a senior software engineer writing a precise handoff brief for the next engineer.`,
+    `You never claim errors are fixed unless the session log explicitly confirms it.`,
     `Write ${targetWords} words max. Output ONLY prose — no bullet lists, no file lists, no headings.`,
     ``,
-    `Rules:`,
-    `- Describe WHAT was done and WHY, not which files were touched (file list is stored separately)`,
-    `- Name specific bugs fixed, features added, or architectural changes made`,
-    `- If decisions conflict, report only the FINAL decision`,
-    `- If an error was resolved, say "resolved" — don't re-report the error`,
-    `- End with what is unfinished or what the next session should start with`,
+    `RULES (mandatory — no exceptions):`,
+    `1. Report ONLY the final decision on each topic. If a decision changed, report only the latest version.`,
+    `2. Do NOT claim an error was fixed unless the log explicitly confirms the fix succeeded.`,
+    `3. If an error appeared fixed then recurred, report it as STILL UNRESOLVED.`,
+    `4. The CURRENT TASK is the LAST active, incomplete task mentioned — not the most-mentioned one.`,
+    `5. Ignore code blocks marked [CODE BLOCK] — they are implementation noise, not session facts.`,
+    `6. Ignore entries marked [REFERENCE DOCUMENT] — they are background material, not decisions.`,
+    `7. State only facts present in the session data. Do not infer or extrapolate.`,
+    `8. End with what is unfinished and what the next session should start with.`,
     ``,
-    `Session data:`,
+    `<session_data>`,
     sessionData,
+    `</session_data>`,
+    ``,
+    `[FOCUS: The CURRENT TASK is the LAST active task above. Report only the FINAL state of each decision.]`,
     ``,
     `Brief:`,
   ].join('\n');
@@ -448,7 +455,12 @@ async function runSingleModel(modelId) {
     let output = '';
     let inferError = null;
     try {
-      output = (await session.prompt(prompt, { maxTokens })).trim();
+      output = (await session.prompt(prompt, {
+        maxTokens,
+        temperature: 0.1,     // near-greedy — maximizes faithfulness while allowing richer outputs than temperature=0
+        topK: 1,
+        repeatPenalty: 1.05,
+      })).trim();
     } catch (err) {
       output = '';
       inferError = err.message;

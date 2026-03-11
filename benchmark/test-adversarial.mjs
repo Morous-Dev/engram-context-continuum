@@ -58,22 +58,66 @@ const MODELS = [
 
 // ── Archivist prompt (same as production) ─────────────────────────────────────
 
+/**
+ * Preprocess session data — strip code blocks, stack traces, reference docs.
+ * Mirrors src/compression/preprocess.ts for benchmark accuracy.
+ */
+function preprocessSessionData(text) {
+  let result = text;
+  // Strip reference document sections (between --- delimiters, explicitly labelled)
+  result = result.replace(
+    /(?:reference(?:\s+material)?|pasted?(?:\s+for\s+context)?|background)[^\n]*\n---\n([\s\S]*?)---/gi,
+    (_match, body) => {
+      const words = body.split(/\s+/).filter(Boolean).length;
+      const firstLine = body.trim().split('\n')[0]?.trim().slice(0, 80) ?? '';
+      return `[REFERENCE DOCUMENT: ~${words} words${firstLine ? ` — "${firstLine}"` : ''}]`;
+    }
+  );
+  // Strip fenced code blocks → compact placeholder
+  result = result.replace(/```(\w*)\n?([\s\S]*?)```/g, (_match, lang, body) => {
+    const lines = body.split('\n').filter(l => l.trim()).length;
+    const firstMeaningful = body.split('\n').map(l => l.trim())
+      .find(l => l && !l.startsWith('//') && !l.startsWith('#') && !l.startsWith('*'));
+    const hint = firstMeaningful ? ` — ${firstMeaningful.slice(0, 60)}` : '';
+    const langTag = lang ? `${lang[0].toUpperCase()}${lang.slice(1)}, ` : '';
+    return `[CODE BLOCK: ${langTag}~${lines} lines${hint}]`;
+  });
+  // Strip stack traces → single-line summary
+  result = result.replace(
+    /([\w.]+(?:Exception|Error|Traceback|Error:)[^\n]{0,200})\n((?:\s+(?:at |File ")[^\n]+\n){2,})/g,
+    (_match, errorLine) => {
+      const clean = errorLine.replace(/^[\w.]+\.([\w]+(?:Exception|Error))/, '$1').trim();
+      return `[STACK TRACE: ${clean.slice(0, 120)}]\n`;
+    }
+  );
+  return result;
+}
+
+/** Production prompt — kept in sync with src/compression/tier3.ts buildCompressionPrompt. */
 function buildPrompt(sessionData) {
-  const wordCount = sessionData.split(/\s+/).length;
+  const cleaned = preprocessSessionData(sessionData);
+  const wordCount = cleaned.split(/\s+/).length;
   const targetWords = Math.floor(wordCount / 3);
   return [
-    `You are a session archivist. Produce a concise handoff brief for the next coding session.`,
+    `You are a senior software engineer writing a precise handoff brief for the next engineer.`,
+    `You never claim errors are fixed unless the session log explicitly confirms it.`,
     `Write ${targetWords} words max. Output ONLY prose — no bullet lists, no file lists, no headings.`,
     ``,
-    `Rules:`,
-    `- Describe WHAT was done and WHY, not which files were touched (file list is stored separately)`,
-    `- Name specific bugs fixed, features added, or architectural changes made`,
-    `- If decisions conflict, report only the FINAL decision`,
-    `- If an error was resolved, say "resolved" — don't re-report the error`,
-    `- End with what is unfinished or what the next session should start with`,
+    `RULES (mandatory — no exceptions):`,
+    `1. Report ONLY the final decision on each topic. If a decision changed, report only the latest version.`,
+    `2. Do NOT claim an error was fixed unless the log explicitly confirms the fix succeeded.`,
+    `3. If an error appeared fixed then recurred, report it as STILL UNRESOLVED.`,
+    `4. The CURRENT TASK is the LAST active, incomplete task mentioned — not the most-mentioned one.`,
+    `5. Ignore code blocks marked [CODE BLOCK] — they are implementation noise, not session facts.`,
+    `6. Ignore entries marked [REFERENCE DOCUMENT] — they are background material, not decisions.`,
+    `7. State only facts present in the session data. Do not infer or extrapolate.`,
+    `8. End with what is unfinished and what the next session should start with.`,
     ``,
-    `Session data:`,
-    sessionData,
+    `<session_data>`,
+    cleaned,
+    `</session_data>`,
+    ``,
+    `[FOCUS: The CURRENT TASK is the LAST active task above. Report only the FINAL state of each decision.]`,
     ``,
     `Brief:`,
   ].join('\n');
@@ -454,12 +498,14 @@ Timeline of events this session:
       const lower = output.toLowerCase();
       // Must mention race condition or message ordering
       const mentionsIssue = lower.includes('race') || (lower.includes('message') && lower.includes('order')) || lower.includes('websocket');
-      // Must NOT claim the race condition was ultimately resolved
-      // (it was briefly "resolved" at 09:41 but recurred and is still open)
+      // Must NOT claim the race condition was ultimately resolved.
+      // IMPORTANT: use \b word boundaries so "unresolved" does NOT match (resolved).
+      // Without \b, "race condition...unresolved" falsely triggers the pattern because
+      // "unresolved" contains "resolved" as a substring.
       const claimsResolved =
-        /race\s*condition.{0,60}(resolved|fixed|solved)/i.test(output) ||
-        /(resolved|fixed|solved).{0,60}race\s*condition/i.test(output) ||
-        /mutex.{0,40}(resolved|fixed|solved|worked)/i.test(output) ||
+        /race\s*condition.{0,60}\b(resolved|fixed|solved)\b/i.test(output) ||
+        /\b(resolved|fixed|solved)\b.{0,60}race\s*condition/i.test(output) ||
+        /mutex.{0,40}\b(resolved|fixed|solved|worked)\b/i.test(output) ||
         /\bsuccessfully\s+(fixed|resolved)\b/i.test(output);
       // Must mention it's still open / what comes next
       const mentionsOpen =
@@ -735,7 +781,12 @@ async function runSingleModel(modelId) {
     const t0 = Date.now();
     let output = '';
     try {
-      output = (await testSession.prompt(prompt, { maxTokens })).trim();
+      output = (await testSession.prompt(prompt, {
+        maxTokens,
+        temperature: 0.1,     // near-greedy — maximizes faithfulness while allowing richer outputs than temperature=0
+        topK: 1,
+        repeatPenalty: 1.05,
+      })).trim();
     } catch (err) {
       output = `[inference error: ${err.message}]`;
     }
