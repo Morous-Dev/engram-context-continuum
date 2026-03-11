@@ -10,17 +10,24 @@
  *   T2 — Error truthfulness: must NOT claim an unresolved error was fixed
  *   T3 — Intent extraction: must identify current task correctly
  *
- * Depends on: node-llama-cpp, build/compression/index.js
+ * Architecture:
+ *   Each model is tested in an isolated subprocess (--model-id <id> flag) so
+ *   that CUDA context and VRAM are fully released between model runs. Without
+ *   isolation, CUDA's lazy memory management causes false "VRAM insufficient"
+ *   errors for models tested after the first one.
+ *
  * Run via: node benchmark/test-models.mjs
+ * Depends on: node-llama-cpp
  */
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const MODELS_DIR = join(homedir(), '.engram-cc', 'models');
-const BUILD      = join(process.cwd(), 'build');
+const THIS_FILE  = fileURLToPath(import.meta.url);
 
 // ── Models to test ────────────────────────────────────────────────────────────
 
@@ -51,6 +58,10 @@ const MODELS = [
     // GPU-then-CPU fallback is handled inside tier3b.ts; the test uses the
     // same prompt as production.
     noThink:   true,
+    // Qwen 3.5 2B has a disproportionately large KV cache per token.
+    // Binary search confirmed: FAILS at 1024, WORKS at 768. Max GPU ctx = 768.
+    // Try 768 first; if that still fails (different GPU), try 512 before CPU.
+    gpuCtxSizes: [768, 512],
   },
 ];
 
@@ -175,55 +186,79 @@ Session summary:
   },
 ];
 
-// ── Model runner ──────────────────────────────────────────────────────────────
+// ── Single-model worker (subprocess mode) ─────────────────────────────────────
 
 /**
- * Load a GGUF model via node-llama-cpp and run all 3 tests.
- * Returns an array of { passed, output } results in test order.
+ * Run tests for a single model.
+ * Called when this script is spawned with --model-id <id>.
+ * Outputs a JSON array of { passed, output, ms, mode } to stdout.
+ * Stderr is used for progress messages (visible to parent via inherited stdio).
  *
- * Context size strategy:
- * - Tries 4096 first (sweet spot for our use case)
- * - Falls back to 2048 if 4096 fails (GPU VRAM constraint)
- * - Falls back to 1024 as last resort
- * - Forces CPU mode if VRAM errors occur
+ * Each model runs in its own process so that CUDA VRAM is fully released
+ * between model runs. Sharing a process causes CUDA lazy-GC to accumulate
+ * allocations and falsely report "VRAM insufficient" for later models.
+ *
+ * @param {string} modelId - ID from MODELS array.
  */
-async function runModelTests(modelFile, modelDef) {
-  const modelPath = join(MODELS_DIR, modelFile);
+async function runSingleModel(modelId) {
+  const modelDef = MODELS.find(m => m.id === modelId);
+  if (!modelDef) { process.stderr.write(`Unknown model: ${modelId}\n`); process.exit(1); }
+
+  const modelPath = join(MODELS_DIR, modelDef.file);
 
   let llamaCpp;
   try {
     llamaCpp = await import('node-llama-cpp');
   } catch {
-    return TESTS.map(() => ({ passed: false, output: '[node-llama-cpp not available]', ms: 0 }));
+    const fail = TESTS.map(() => ({ passed: false, output: '[node-llama-cpp not available]', ms: 0, mode: 'none' }));
+    process.stdout.write(JSON.stringify(fail) + '\n');
+    return;
   }
 
   let llama, model, ctx, session;
   let loadError = null;
+  let mode = 'unknown';
 
-  // Attempt 1: GPU inference (fast — uses partial GPU offload automatically)
-  try {
-    llama   = await llamaCpp.getLlama();
-    model   = await llama.loadModel({ modelPath });
-    ctx     = await model.createContext({ contextSize: 4096 });
-    session = new llamaCpp.LlamaChatSession({ contextSequence: ctx.getSequence() });
-    console.log(`  Mode: GPU inference (4096 ctx)`);
-  } catch (gpuErr) {
-    loadError = gpuErr;
-    const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr);
-    try { await ctx?.dispose(); } catch { /* ignore */ }
-    try { await model?.dispose(); } catch { /* ignore */ }
-    try { await llama?.dispose(); } catch { /* ignore */ }
-    ctx = model = llama = session = null;
+  // Context sizes to try on GPU (in order). Qwen 3.5 2B has a large KV cache
+  // and fails at ≥1024 even with ample VRAM — 768 is the confirmed max.
+  // Other models try 4096 first (standard); if that fails, fall through to CPU.
+  const gpuContextSizes = modelDef.gpuCtxSizes ?? [4096];
 
-    // Attempt 2: CPU-only (fallback for VRAM-constrained machines)
-    if (msg.toLowerCase().includes('vram')) {
-      console.log(`  GPU VRAM insufficient — falling back to CPU inference`);
+  for (const ctxSize of gpuContextSizes) {
+    try {
+      llama   = await llamaCpp.getLlama();
+      model   = await llama.loadModel({ modelPath });
+      ctx     = await model.createContext({ contextSize: ctxSize });
+      session = new llamaCpp.LlamaChatSession({ contextSequence: ctx.getSequence() });
+      mode    = `GPU (${ctxSize} ctx)`;
+      process.stderr.write(`  Mode: GPU inference (${ctxSize} ctx)\n`);
+      loadError = null;
+      break; // success — stop trying smaller sizes
+    } catch (gpuErr) {
+      loadError = gpuErr;
+      const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr).toLowerCase();
+      try { await ctx?.dispose(); } catch { /* ignore */ }
+      try { await model?.dispose(); } catch { /* ignore */ }
+      try { await llama?.dispose(); } catch { /* ignore */ }
+      ctx = model = llama = session = null;
+
+      if (!(msg.includes('vram') || msg.includes('too large'))) break; // non-VRAM error, stop retrying
+      process.stderr.write(`  GPU ctx ${ctxSize} failed (VRAM): ${String(gpuErr instanceof Error ? gpuErr.message : gpuErr).slice(0, 120)}\n`);
+    }
+  }
+
+  // Attempt 2 (final fallback): CPU-only inference
+  if (!session && loadError) {
+    const msg = String(loadError instanceof Error ? loadError.message : loadError).toLowerCase();
+    if (msg.includes('vram') || msg.includes('too large')) {
+      process.stderr.write(`  GPU exhausted — falling back to CPU inference\n`);
       try {
         llama   = await llamaCpp.getLlama({ gpu: false });
         model   = await llama.loadModel({ modelPath });
         ctx     = await model.createContext({ contextSize: 4096 });
         session = new llamaCpp.LlamaChatSession({ contextSequence: ctx.getSequence() });
-        console.log(`  Mode: CPU inference (4096 ctx)`);
+        mode    = 'CPU (4096 ctx)';
+        process.stderr.write(`  Mode: CPU inference (4096 ctx)\n`);
         loadError = null;
       } catch (cpuErr) {
         loadError = cpuErr;
@@ -232,13 +267,17 @@ async function runModelTests(modelFile, modelDef) {
   }
 
   if (!session) {
-    return TESTS.map(() => ({ passed: false, output: `[load failed: ${loadError instanceof Error ? loadError.message : String(loadError)}]`, ms: 0 }));
+    const msg = loadError instanceof Error ? loadError.message : String(loadError);
+    const fail = TESTS.map(() => ({ passed: false, output: `[load failed: ${msg}]`, ms: 0, mode: 'failed' }));
+    process.stdout.write(JSON.stringify(fail) + '\n');
+    try { await ctx?.dispose(); } catch { /* ignore */ }
+    try { await model?.dispose(); } catch { /* ignore */ }
+    try { await llama?.dispose(); } catch { /* ignore */ }
+    return;
   }
 
   const results = [];
   for (const test of TESTS) {
-    // Apply /no_think prefix for models with thinking mode to avoid empty outputs
-    // caused by LlamaChatSession stripping <think>...</think> blocks.
     const rawPrompt = buildPrompt(test.input);
     const prompt = modelDef.noThink ? `/no_think\n\n${rawPrompt}` : rawPrompt;
     const wordCount = test.input.split(/\s+/).length;
@@ -253,21 +292,30 @@ async function runModelTests(modelFile, modelDef) {
       output = `[inference error: ${err.message}]`;
     }
     const ms = Date.now() - t0;
-    results.push({ passed: test.evaluate(output), output, ms });
+    results.push({ passed: test.evaluate(output), output, ms, mode });
   }
 
   try { await ctx.dispose(); } catch { /* ignore */ }
   try { await model.dispose(); } catch { /* ignore */ }
   try { await llama.dispose(); } catch { /* ignore */ }
 
-  return results;
+  process.stdout.write(JSON.stringify(results) + '\n');
 }
 
-// ── Main ──────────────────────────────────────────────────────────────────────
+// ── Main orchestrator ─────────────────────────────────────────────────────────
 
+const modelIdArg = process.argv.indexOf('--model-id');
+if (modelIdArg !== -1) {
+  // Subprocess mode: test one model, output JSON
+  await runSingleModel(process.argv[modelIdArg + 1]);
+  process.exit(0);
+}
+
+// Orchestrator mode: spawn a subprocess per model for CUDA isolation
 console.log('\n' + '═'.repeat(70));
 console.log('  SLM QUALITY COMPARISON — Engram Context Continuum');
 console.log('═'.repeat(70));
+console.log('  (Each model runs in an isolated subprocess for CUDA VRAM isolation)');
 
 const allResults = [];
 
@@ -284,14 +332,30 @@ for (const m of MODELS) {
   console.log(`  File:    ${m.file}`);
   console.log(`  Loading model...`);
 
-  const results = await runModelTests(m.file, m);
+  const proc = spawnSync(process.execPath, [THIS_FILE, '--model-id', m.id], {
+    stdio: ['ignore', 'pipe', 'inherit'],  // inherit stderr for live progress, pipe stdout for JSON
+    timeout: 20 * 60 * 1000,              // 20 min per model (Qwen CPU needs ~11 min)
+    encoding: 'utf8',
+  });
+
+  let results;
+  if (proc.error || proc.status !== 0) {
+    results = TESTS.map(() => ({ passed: false, output: `[subprocess failed: ${proc.error?.message ?? 'exit ' + proc.status}]`, ms: 0, mode: 'failed' }));
+  } else {
+    try {
+      results = JSON.parse(proc.stdout.trim().split('\n').pop());
+    } catch {
+      results = TESTS.map(() => ({ passed: false, output: `[JSON parse error: ${proc.stdout.slice(0, 100)}]`, ms: 0, mode: 'failed' }));
+    }
+  }
+
   allResults.push({ model: m, results });
 
   for (let i = 0; i < TESTS.length; i++) {
     const t = TESTS[i];
     const r = results[i];
     const icon = r.passed ? '✓' : '✗';
-    console.log(`\n  ${icon} ${t.id}: ${t.name} (${r.ms}ms)`);
+    console.log(`\n  ${icon} ${t.id}: ${t.name} (${r.ms}ms${r.mode && r.mode !== 'failed' ? ', ' + r.mode : ''})`);
     console.log(`    Hint: ${t.hint}`);
     console.log(`    Output: ${r.output.slice(0, 200).replace(/\n/g, ' ')}${r.output.length > 200 ? '...' : ''}`);
   }
