@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+
+# GGUF models (large binary files)
+.engram-cc/
+
+# Misc
+*.log
+.DS_Store
+Thumbs.db
+
+# Local temp files
+C:/Temp/
+*.incomplete
+
+# ECC local state (not source code)
+.ecc-id
+
+# Sensitive/local config overrides
+.claude/settings.local.json
+
+# Benchmark output logs
+benchmark/*.txt

@@ -1,0 +1,65 @@
+{
+  "name": "engram-cc",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Engram Context Continuum (EngramCC) — universal AI coding assistant memory: session handoff, multi-tier memory bank, smart compaction, and bundled AI compression. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI, and Cursor.",
+  "bin": {
+    "engramcc": "./build/cli/setup.js"
+  },
+  "files": [
+    "build/",
+    "src/hooks/",
+    "src/hooks/README.md",
+    "plugin-config.yaml",
+    ".claude-plugin/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf build",
+    "setup": "npm run build && node build/cli/setup.js",
+    "postinstall": "node build/cli/setup.js --yes || true"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "engram",
+    "memory",
+    "context",
+    "session-handoff",
+    "mcp",
+    "claude-code",
+    "gemini-cli",
+    "vscode-copilot",
+    "opencode",
+    "codex",
+    "cursor",
+    "ai-coding-assistant",
+    "llm",
+    "plugin"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "better-sqlite3": "^12.6.2",
+    "js-yaml": "^4.1.0",
+    "zod": "^4.3.6"
+  },
+  "optionalDependencies": {
+    "sqlite-vec": "^0.1.6",
+    "@huggingface/transformers": "^3.3.0",
+    "node-llama-cpp": "^3.6.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "trustedDependencies": [
+    "node-llama-cpp",
+    "onnxruntime-node",
+    "protobufjs"
+  ]
+}

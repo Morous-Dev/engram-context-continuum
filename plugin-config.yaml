@@ -1,0 +1,63 @@
+# super-context-plugin configuration
+# All settings have safe defaults. Edit to customize.
+
+version: "0.1.0"
+
+# ── Compaction ──────────────────────────────────────────────────────────────
+compaction:
+  # Threshold at which PreCompact fires (0.0–1.0 of context window).
+  # JetBrains NeurIPS 2025 research shows 80% is the optimal sweet spot.
+  threshold: 0.80
+
+  # Maximum compression ratio for AI compression (Tiers 2–4).
+  # Never compress below this ratio — decisions and reasoning must survive.
+  max_compression_ratio: 3.0
+
+# ── Session Handoff ──────────────────────────────────────────────────────────
+handoff:
+  # Maximum age of a handoff YAML before it is considered stale (minutes).
+  # Stale handoffs are not injected into new sessions.
+  max_age_minutes: 15
+
+  # Maximum number of user messages to include from transcript analysis.
+  max_user_messages: 15
+
+  # Maximum characters per assistant snippet captured from transcript.
+  max_assistant_chars: 800
+
+  # Deduplication similarity threshold (0.0–1.0, based on SequenceMatcher ratio).
+  # Messages above this threshold are considered near-duplicates and dropped.
+  dedup_threshold: 0.85
+
+# ── Memory Bank ──────────────────────────────────────────────────────────────
+memory:
+  # Maximum events stored per session before FIFO eviction.
+  max_events_per_session: 1000
+
+  # Number of recent events checked for deduplication on insert.
+  dedup_window: 5
+
+  # Maximum age (days) for session data cleanup on fresh start.
+  session_max_age_days: 7
+
+  # Graph memory: maximum BFS traversal depth for neighbor queries.
+  graph_max_depth: 3
+
+# ── AI Compression Tiers ────────────────────────────────────────────────────
+# Tier 1: Rule-based (always active, zero size)
+# Tier 2: @huggingface/transformers + Qwen3-0.6B-ONNX (~400 MB, pure npm)
+# Tier 3a: node-llama-cpp + Qwen 2.5 1.5B Q8_0 (1.65 GB) — potato machines
+# Tier 3b: node-llama-cpp + Llama 3.2 3B Q5_K_M (2.32 GB) — normal machines
+# Tier 3c: node-llama-cpp + Phi-4 Mini Q5_K_M/Q8_0 (2.85–4.08 GB) — capable machines
+# Tier 4: External (Ollama / LM Studio / Groq / Claude API)
+compression:
+  # "auto" selects tier based on available RAM/VRAM. Override to force a tier.
+  # Values: "tier1" | "tier2" | "tier3a" | "tier3b" | "tier3c" | "tier4" | "auto"
+  tier: "auto"
+
+  # Tier 4 only: external provider config
+  external:
+    # Values: "ollama" | "lmstudio" | "groq" | "claude"
+    provider: "ollama"
+    model: "phi4-mini"
+    base_url: "http://localhost:11434"
