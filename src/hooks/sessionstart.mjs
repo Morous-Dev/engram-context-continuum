@@ -33,6 +33,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 
+function escapeXML(s) {
+  if (typeof s !== "string") return String(s);
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(HOOK_DIR, "..", "..");
 const BUILD_SESSION = join(PROJECT_ROOT, "build", "session");
@@ -175,7 +185,7 @@ try {
           additionalContext += "\n" + formatHandoffForContext(handoff);
         } else if (handoff.headline) {
           console.error(`[EngramCC:sessionstart] cold start (${ageMins}min old), injecting headline only`);
-          additionalContext += `\n<session_brief project="${projectDir}" age="${ageMins}min ago">Last session: ${handoff.headline} — Full context available via the recall MCP tool.</session_brief>`;
+          additionalContext += `\n<session_brief project="${escapeXML(projectDir)}" age="${ageMins}min ago">Last session: ${escapeXML(handoff.headline)} — Full context available via the recall MCP tool.</session_brief>`;
         } else {
           console.error(`[EngramCC:sessionstart] cold start, no headline — falling back to full handoff`);
           additionalContext += "\n" + formatHandoffForContext(handoff);

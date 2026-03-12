@@ -14,6 +14,7 @@ import yaml from "js-yaml";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { getProjectId } from "../project-id.js";
+import { escapeXML } from "../truncate.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ export interface SessionUpdateData {
 
 /**
  * Get the working memory file path for a given project directory.
- * Path: [projectDir]/.claude/super-context/working.yaml
+ * Path: [projectDir]/.engram-cc/working.yaml
  * Creates the directory if it doesn't exist.
  *
  * @param projectDir - Absolute path to the project directory.
@@ -173,27 +174,27 @@ export function mergeWorkingMemory(
  */
 export function formatWorkingMemoryForContext(memory: WorkingMemory): string {
   const lines: string[] = [];
-  lines.push(`<working_memory project="${memory.project_dir}" updated="${memory.last_updated}">`);
+  lines.push(`<working_memory project="${escapeXML(memory.project_dir)}" updated="${memory.last_updated}">`);
 
   if (memory.user_preferences) {
-    lines.push(`  <user_preferences>${memory.user_preferences}</user_preferences>`);
+    lines.push(`  <user_preferences>${escapeXML(memory.user_preferences)}</user_preferences>`);
   }
 
   if (memory.codebase_conventions) {
-    lines.push(`  <codebase_conventions>${memory.codebase_conventions}</codebase_conventions>`);
+    lines.push(`  <codebase_conventions>${escapeXML(memory.codebase_conventions)}</codebase_conventions>`);
   }
 
   if (memory.persistent_decisions.length > 0) {
     lines.push("  <persistent_decisions>");
     for (const d of memory.persistent_decisions.slice(-10)) {
-      lines.push(`    - ${d}`);
+      lines.push(`    - ${escapeXML(d)}`);
     }
     lines.push("  </persistent_decisions>");
   }
 
   if (memory.frequently_modified_files.length > 0) {
     lines.push("  <frequent_files>");
-    lines.push(`    ${memory.frequently_modified_files.slice(0, 10).join(", ")}`);
+    lines.push(`    ${memory.frequently_modified_files.slice(0, 10).map(escapeXML).join(", ")}`);
     lines.push("  </frequent_files>");
   }
 

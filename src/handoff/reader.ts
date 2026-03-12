@@ -15,6 +15,7 @@ import yaml from "js-yaml";
 import { readFileSync, existsSync } from "node:fs";
 import type { HandoffData } from "./writer.js";
 import { getHandoffPath } from "./writer.js";
+import { escapeXML } from "../truncate.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -83,39 +84,39 @@ export function readHandoff(projectDir: string, maxAgeMs = DEFAULT_MAX_AGE_MS): 
  */
 export function formatHandoffForContext(handoff: HandoffData): string {
   const lines: string[] = [];
-  lines.push(`<previous_session_handoff session="${handoff.session_id}" timestamp="${handoff.timestamp}" confidence="${handoff.confidence}">`);
+  lines.push(`<previous_session_handoff session="${escapeXML(handoff.session_id)}" timestamp="${handoff.timestamp}" confidence="${handoff.confidence}">`);
 
   if (handoff.current_task) {
     lines.push("  <current_task>");
-    lines.push(`    ${handoff.current_task}`);
+    lines.push(`    ${escapeXML(handoff.current_task)}`);
     lines.push("  </current_task>");
   }
 
   if (handoff.last_action) {
-    lines.push(`  <last_action>${handoff.last_action}</last_action>`);
+    lines.push(`  <last_action>${escapeXML(handoff.last_action)}</last_action>`);
   }
 
   if (handoff.next_steps.length > 0) {
     lines.push("  <next_steps>");
-    for (const step of handoff.next_steps) lines.push(`    - ${step}`);
+    for (const step of handoff.next_steps) lines.push(`    - ${escapeXML(step)}`);
     lines.push("  </next_steps>");
   }
 
   if (handoff.decisions.length > 0) {
     lines.push("  <decisions>");
-    for (const d of handoff.decisions) lines.push(`    - ${d}`);
+    for (const d of handoff.decisions) lines.push(`    - ${escapeXML(d)}`);
     lines.push("  </decisions>");
   }
 
   if (handoff.files_modified.length > 0) {
     lines.push("  <files_modified>");
-    lines.push(`    ${handoff.files_modified.join(", ")}`);
+    lines.push(`    ${handoff.files_modified.map(escapeXML).join(", ")}`);
     lines.push("  </files_modified>");
   }
 
   if (handoff.errors_encountered.length > 0) {
     lines.push("  <errors_encountered>");
-    for (const e of handoff.errors_encountered) lines.push(`    - ${e}`);
+    for (const e of handoff.errors_encountered) lines.push(`    - ${escapeXML(e)}`);
     lines.push("  </errors_encountered>");
   }
 
@@ -123,26 +124,26 @@ export function formatHandoffForContext(handoff: HandoffData): string {
   // These are high-signal for the next session — displayed prominently.
   if (handoff.blockers.length > 0) {
     lines.push("  <blockers>");
-    for (const b of handoff.blockers) lines.push(`    - ${b}`);
+    for (const b of handoff.blockers) lines.push(`    - ${escapeXML(b)}`);
     lines.push("  </blockers>");
   }
 
   if (handoff.open_questions.length > 0) {
     lines.push("  <open_questions>");
-    for (const q of handoff.open_questions) lines.push(`    - ${q}`);
+    for (const q of handoff.open_questions) lines.push(`    - ${escapeXML(q)}`);
     lines.push("  </open_questions>");
   }
 
   if (handoff.working_context) {
-    lines.push(`  <working_context>${handoff.working_context}</working_context>`);
+    lines.push(`  <working_context>${escapeXML(handoff.working_context)}</working_context>`);
   }
 
   if (handoff.user_preferences) {
-    lines.push(`  <user_preferences>${handoff.user_preferences}</user_preferences>`);
+    lines.push(`  <user_preferences>${escapeXML(handoff.user_preferences)}</user_preferences>`);
   }
 
   if (handoff.codebase_conventions) {
-    lines.push(`  <codebase_conventions>${handoff.codebase_conventions}</codebase_conventions>`);
+    lines.push(`  <codebase_conventions>${escapeXML(handoff.codebase_conventions)}</codebase_conventions>`);
   }
 
   lines.push("</previous_session_handoff>");
