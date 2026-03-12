@@ -1,6 +1,6 @@
 # Engram Context Continuum (EngramCC) — Project Context
 
-Last verified: 2026-03-11
+Last verified: 2026-03-12
 This file is the project-specific companion to CLAUDE.md.
 Code and migrations win over this file when facts conflict.
 
@@ -16,7 +16,7 @@ Code and migrations win over this file when facts conflict.
 | Knowledge graph | SQLite tables (graph_nodes + graph_edges + BFS) |
 | Vector store | sqlite-vec extension (optional, graceful fallback) |
 | SLM Tier 2 | @huggingface/transformers ONNX — embeddings |
-| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B Q5_K_M GGUF (sole model — 3/3 quality tests) |
+| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B / Qwen3.5 4B / Gemma 3 4B GGUF (all 10/10 adversarial) |
 | SLM Tier 4 | External HTTP provider (Ollama / LM Studio / Groq) |
 | Memory files | YAML (handoff.yaml, working.yaml in .engram-cc/) |
 | Project identity | UUID in .ecc-id (git-root-hash fallback, generated fallback) |
@@ -53,10 +53,13 @@ When facts conflict, use:
 - **Session DB path** — `~/.engram-cc/sessions/<uuid>.db`
 - **Hook event flow:**
   - `UserPromptSubmit` — captures user intent, stores to DB
-  - `PostToolUse` — captures tool results, file ops, errors
-  - `PreCompact` — runs local SLM to compress context before compaction fires
+  - `PostToolUse` — captures tool results, file ops, errors + subconscious retrieval:
+    on Edit/Write/Bash/AskUserQuestion, searches VectorDB (cross-session) and FTS5
+    (current session) for relevant memories and injects them as additionalContext
+  - `PreCompact` — 3-layer compaction recovery: XML snapshot + SLM brief + engram
+    retrieval (vector/FTS/graph). Parallel on power hardware (VRAM ≥ 12 GB).
   - `SessionStart` — tiered injection: full handoff if < 30 min old, headline + MCP
-    pointer if cold start
+    pointer if cold start. On compact: XML snapshot + SLM brief + retrieved engrams.
   - `Stop` — synthesizes working_context + headline via local SLM, writes handoff
     YAML, updates knowledge graph, embeds high-value events to vector store
 - **Adapter registration** — `setup.ts` detects installed assistants and registers
@@ -90,9 +93,15 @@ When facts conflict, use:
 - `src/memory/vector.ts` — sqlite-vec wrapper with graceful fallback
 
 **SLM / compression:**
-- `src/compression/index.ts` — getCompressor() factory with auto-detection + fallback chain
+- `src/compression/index.ts` — getCompressor() + getHardwareProfile() factories
+- `src/compression/detect.ts` — RAM/VRAM detection (nvidia-smi, rocm-smi, wmic); HardwareProfile
 - `src/compression/tier3.ts` — node-llama-cpp GGUF compressor (uses .engram-cc/models/)
 - `src/compression/types.ts` — Compressor interface (compress, embed, isAvailable)
+
+**Engram retrieval (compaction recovery):**
+- `src/session/engram-retrieval.ts` — 4-path retrieval engine: vector, FTS5, graph BFS, anchor facts
+- `src/session/compact-brief.ts` — SLM-compressed brief generator for compaction recovery
+- `src/session/compact-budget.ts` — Dynamic token budget calculator (scales with compact_count)
 
 **Multi-assistant:**
 - `src/adapters/types.ts` — AssistantAdapter interface
@@ -131,6 +140,7 @@ MCP tools (served via stdio to any connected assistant):
 | search | FTS5 full-text search over all session events |
 | recent | Most recent N session events, filterable by category |
 | graph_query | BFS traversal of the knowledge graph |
+| semantic_search | Vector similarity search over embedded session events (MiniLM) |
 
 ## 6. Security Baseline
 
@@ -155,7 +165,21 @@ MCP tools (served via stdio to any connected assistant):
 - SLM synthesis: working_context + headline generated at session end; all structured
   fields (files_modified, decisions, errors) remain rule-based with 100% recall
 
-## 8. Known Mismatches / Technical Debt
+## 8. Hardware Profiles
+
+Detected automatically at startup — cannot be forced via config.
+
+| Profile | Condition | Pipeline behavior |
+|---------|-----------|-------------------|
+| `minimal` | No GPU / VRAM < 4 GB | Sequential PreCompact, single model |
+| `standard` | VRAM 4–11 GB or RAM ≥ 16 GB | Sequential PreCompact, GPU-assisted |
+| `power` | VRAM ≥ 12 GB or Apple Silicon ≥ 16 GB | Parallel PreCompact (SLM + retrieval concurrent) |
+
+Detection: `nvidia-smi` (NVIDIA), `rocm-smi` (AMD Linux), `wmic` (Windows vendor-agnostic), total RAM proxy (Apple Silicon). All calls are cached after first invocation and time out at 500ms.
+
+Disable subconscious retrieval (PostToolUse): `ENGRAM_SUBCONSCIOUS=0`
+
+## 9. Known Mismatches / Technical Debt
 
 - **All hooks run via Node** — stop.ts is compiled to build/hooks/stop.js and run via
   Node like every other hook. Previously used Bun for TS-native execution, but Bun
@@ -171,8 +195,17 @@ MCP tools (served via stdio to any connected assistant):
   not install. Users on Windows without build tools fall back to tier2 or tier1.
 - **sqlite-vec is optional** — vector search degrades gracefully to no-op if the
   extension is not available. Core functionality unaffected.
+- **Multi-compaction session handoff** — Fixed (2026-03-12). The stop hook now reads
+  the full compaction chain from `session_resume_history` (one row per cycle, append
+  model) and passes it into `buildHandoffFromEvents()`. `buildSynthesisInput()` accepts
+  `priorCompactionBriefs[]` and prepends them before the tail events so the SLM
+  synthesizes the full session arc. `precompact.mjs` writes to both `session_resume`
+  (current-snapshot for sessionstart injection) and `session_resume_history` (chain for
+  stop hook). SLM briefs are chain-aware from cycle 2 onward — each brief receives
+  prior briefs as context. Benchmark: A11 in test-adversarial.mjs validates
+  multi-compaction synthesis quality.
 
-## 9. Related Contracts
+## 10. Related Contracts
 
 - `CLAUDE.md` — universal co-developer standard (this project follows it)
 - `src/hooks/README.md` — hook system documentation

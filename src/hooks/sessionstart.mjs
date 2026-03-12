@@ -47,7 +47,7 @@ try {
   const source = input.source ?? "startup";
 
   if (source === "compact") {
-    // Session was compacted — inject resume snapshot + session guide
+    // Session was compacted — inject resume snapshot + session knowledge
     const { SessionDB } = await import(pathToFileURL(join(BUILD_SESSION, "db.js")).href);
     const dbPath = getSessionDBPath();
     const db = new SessionDB({ dbPath });
@@ -56,14 +56,37 @@ try {
     const resume = db.getResume(sessionId);
     if (resume && !resume.consumed) {
       db.markResumeConsumed(sessionId);
-      // Inject the XML resume snapshot directly into context
+      // Always inject the structural XML snapshot (cheap, ~1K tokens)
       additionalContext += "\n" + resume.snapshot;
-    }
 
-    const events = getSessionEvents(db, sessionId);
-    if (events.length > 0) {
-      const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
-      additionalContext += buildSessionDirective("compact", eventMeta);
+      // Use SLM brief instead of raw event dump when available.
+      // SLM brief IS the <session_knowledge> block — already formatted XML.
+      // Same information at 3-5x fewer tokens, plus semantic synthesis.
+      if (resume.slm_brief) {
+        additionalContext += resume.slm_brief;
+      } else {
+        // Fallback: raw event dump (current behavior)
+        const events = getSessionEvents(db, sessionId);
+        if (events.length > 0) {
+          const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
+          additionalContext += buildSessionDirective("compact", eventMeta);
+        }
+      }
+
+      // Inject retrieved engrams alongside the SLM brief.
+      // These are high-fidelity original facts retrieved from VectorDB, FTS, and
+      // knowledge graph — they prevent context rot by preserving exact details
+      // (variable names, file paths, decision rationale) that compression loses.
+      if (resume.engram_context) {
+        additionalContext += resume.engram_context;
+      }
+    } else {
+      // No resume row or already consumed — fall back to raw events
+      const events = getSessionEvents(db, sessionId);
+      if (events.length > 0) {
+        const eventMeta = writeSessionEventsFile(events, getSessionEventsPath());
+        additionalContext += buildSessionDirective("compact", eventMeta);
+      }
     }
 
     db.close();

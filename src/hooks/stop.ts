@@ -6,8 +6,8 @@
  * writes the YAML handoff file for the next session, updates the knowledge
  * graph, and merges session data into the working memory ledger.
  *
- * This hook is run via `bun run src/hooks/stop.ts` — Bun handles TypeScript
- * natively without a separate compile step.
+ * This hook is compiled to `build/hooks/stop.js` and run via Node.js.
+ * Bun was replaced because better-sqlite3 native addon fails silently under Bun.
  *
  * Execution contract: this hook MUST always exit 0. Any failure in the
  * handoff pipeline must be swallowed. A failing Stop hook can prevent
@@ -20,6 +20,7 @@
  */
 
 import { SessionDB } from "../session/db.js";
+import type { ResumeHistoryRow } from "../session/db.js";
 import { extractTranscriptContext } from "../handoff/dedup.js";
 import { buildHandoffFromEvents, writeHandoff } from "../handoff/writer.js";
 import {
@@ -99,12 +100,29 @@ async function main(): Promise<void> {
   const dbPath = getDBPath(projectDir);
   let db: SessionDB | null = null;
   let events: ReturnType<SessionDB["getEvents"]> = [];
+  let resumeChain: ResumeHistoryRow[] = [];
 
   try {
     db = new SessionDB({ dbPath });
     events = db.getEvents(sessionId);
   } catch {
     // DB unavailable — continue without events (handoff still writes from transcript)
+  }
+
+  // ── 2b. Read compaction history chain ──
+  // For multi-compaction sessions (e.g. 10-16 hour coding sessions), this chain
+  // contains one SLM brief per compaction cycle. The stop hook feeds it into
+  // buildHandoffFromEvents() so the final handoff covers the full session arc,
+  // not just the tail events after the last compaction.
+  try {
+    if (db) {
+      resumeChain = db.getResumeChain(sessionId);
+      if (resumeChain.length > 0) {
+        console.error(`[EngramCC:stop] resume chain: ${resumeChain.length} compaction cycle(s)`);
+      }
+    }
+  } catch {
+    // Chain unavailable — handoff falls back to tail-only synthesis
   }
 
   // ── 3. Audit events — remove high-severity ghost tokens ──
@@ -138,6 +156,7 @@ async function main(): Promise<void> {
       workingMem,
       transcriptContext,
       compressor,
+      resumeChain,
     );
     console.error(`[EngramCC:stop] handoff built: headline=${(handoffData.headline ?? "").slice(0, 80)}`);
     writeHandoff(handoffData, projectDir);
@@ -164,15 +183,23 @@ async function main(): Promise<void> {
     vectorDB = new VectorDB(dbPath);
     console.error(`[EngramCC:stop] vector store available=${vectorDB.isAvailable()}`);
     if (vectorDB.isAvailable()) {
-      // Select high-value events for embedding: decisions and P1 task/rule events
+      // Engram paradigm: embed ALL meaningful events, not just decisions.
+      // This populates the vector store for retrieval at compaction time.
+      // Filter: decisions (any priority), errors, tasks, rules, and P1 file ops.
+      // Excluded: low-priority file reads, cwd changes, env events (low semantic value).
       const embedTargets = cleanedEvents.filter(
-        e => e.category === "decision" || (e.priority === 1 && (e.category === "task" || e.category === "rule")),
-      ).slice(-30); // Cap at 30 to keep embedding time bounded
+        e => e.category === "decision"
+          || e.category === "error"
+          || e.category === "task"
+          || e.category === "rule"
+          || (e.category === "prompt" && e.priority === 1)
+          || (e.category === "file" && e.priority === 1 && (e.type === "file_write" || e.type === "file_edit")),
+      ).slice(-50); // Cap at 50 (up from 30) for broader engram coverage
 
       if (embedTargets.length > 0) {
         // Reuses the compressor singleton already initialised in step 6.
         const result = await compressor.embed(embedTargets.map(e => e.data));
-        if (result.embeddings.length === result.embeddings.length && result.dimensions > 0) {
+        if (result.embeddings.length === embedTargets.length && result.dimensions > 0) {
           for (let i = 0; i < result.embeddings.length; i++) {
             const ev = embedTargets[i];
             const embedding = result.embeddings[i];

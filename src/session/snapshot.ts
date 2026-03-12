@@ -229,6 +229,27 @@ export function renderMcpTools(mcpEvents: StoredEvent[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Render <work_progress> from checkpoint events.
+ * Shows completed milestones (commits, tests, builds) so Claude knows
+ * what steps were already done before compaction fired.
+ *
+ * @param checkpointEvents - Events from the "checkpoint" category.
+ * @returns XML string or empty string if no checkpoint events.
+ */
+export function renderWorkProgress(checkpointEvents: StoredEvent[]): string {
+  if (checkpointEvents.length === 0) return "";
+
+  // Take the last 8 checkpoints — most recent progress indicators
+  const recent = checkpointEvents.slice(-8);
+  const lines = ["  <work_progress>"];
+  for (const ev of recent) {
+    lines.push(`    - ${escapeXML(truncateString(ev.data, 150))}`);
+  }
+  lines.push("  </work_progress>");
+  return lines.join("\n");
+}
+
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 /**
@@ -255,26 +276,28 @@ export function buildResumeSnapshot(events: StoredEvent[], opts?: BuildSnapshotO
     (byCategory[ev.category] ??= []).push(ev);
   }
 
-  const file     = byCategory["file"]     ?? [];
-  const task     = byCategory["task"]     ?? [];
+  const file       = byCategory["file"]       ?? [];
+  const task       = byCategory["task"]       ?? [];
   // Exclude rule_content events from the snapshot — CLAUDE.md content is already
   // in the system prompt. Including it here was the primary cause of budget overflow
   // that produced empty snapshots after compaction.
-  const rule     = (byCategory["rule"] ?? []).filter(ev => ev.type !== "rule_content");
-  const decision = byCategory["decision"] ?? [];
-  const cwd      = byCategory["cwd"]      ?? [];
-  const error    = byCategory["error"]    ?? [];
-  const env      = byCategory["env"]      ?? [];
-  const git      = byCategory["git"]      ?? [];
-  const subagent = byCategory["subagent"] ?? [];
-  const intent   = byCategory["intent"]   ?? [];
-  const mcp      = byCategory["mcp"]      ?? [];
-  const plan     = byCategory["plan"]     ?? [];
+  const rule       = (byCategory["rule"] ?? []).filter(ev => ev.type !== "rule_content");
+  const decision   = byCategory["decision"]   ?? [];
+  const cwd        = byCategory["cwd"]        ?? [];
+  const error      = byCategory["error"]      ?? [];
+  const env        = byCategory["env"]        ?? [];
+  const git        = byCategory["git"]        ?? [];
+  const subagent   = byCategory["subagent"]   ?? [];
+  const intent     = byCategory["intent"]     ?? [];
+  const mcp        = byCategory["mcp"]        ?? [];
+  const plan       = byCategory["plan"]       ?? [];
+  const checkpoint = byCategory["checkpoint"] ?? [];
 
   // P1 (50%)
   const p1: string[] = [];
   const af = renderActiveFiles(file);       if (af) p1.push(af);
   const ts = renderTaskState(task);         if (ts) p1.push(ts);
+  const wp = renderWorkProgress(checkpoint); if (wp) p1.push(wp);
   const ru = renderRules(rule);             if (ru) p1.push(ru);
 
   // P2 (35%)

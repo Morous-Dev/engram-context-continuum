@@ -234,7 +234,7 @@ export class Tier4Compressor implements Compressor {
    * @param text     - Text to compress.
    * @param maxRatio - Target compression ratio.
    */
-  async compress(text: string, maxRatio = 3.0): Promise<CompressionResult> {
+  async compress(text: string, maxRatio = 3.0, _promptBuilder?: import("./types.js").PromptBuilder): Promise<CompressionResult> {
     let summary = "";
 
     try {

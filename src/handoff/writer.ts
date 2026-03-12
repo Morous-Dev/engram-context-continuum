@@ -12,7 +12,7 @@
  * All other fields remain rule-based regardless of compressor availability.
  *
  * Depends on: js-yaml, node:fs, node:path, node:os, node:crypto,
- *             src/handoff/dedup.ts, src/truncate.ts,
+ *             src/handoff/dedup.ts, src/truncate.ts, src/session/db.ts,
  *             src/compression/types.ts (optional, for SLM synthesis).
  * Depended on by: src/hooks/stop.ts.
  */
@@ -21,7 +21,7 @@ import yaml from "js-yaml";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { TranscriptContext } from "./dedup.js";
-import type { StoredEvent } from "../session/db.js";
+import type { StoredEvent, ResumeHistoryRow } from "../session/db.js";
 import type { WorkingMemory } from "../memory/working.js";
 import { truncateString } from "../truncate.js";
 
@@ -97,13 +97,17 @@ export function getHandoffPath(projectDir: string): string {
  * Only includes sections that have data. Returns an empty string when all
  * source arrays are empty so the caller can skip the SLM call entirely.
  *
- * @param promptEvents    - "prompt" category events for the session.
- * @param decisionEvents  - "decision" category events for the session.
- * @param filesModified   - Deduplicated list of modified file paths.
- * @param errors          - Truncated error strings from the session.
+ * @param promptEvents           - "prompt" category events for the session.
+ * @param decisionEvents         - "decision" category events for the session.
+ * @param filesModified          - Deduplicated list of modified file paths.
+ * @param errors                 - Truncated error strings from the session.
+ * @param priorCompactionBriefs  - SLM briefs from earlier compaction cycles, oldest
+ *                                 first. When present, prepended before tail events so
+ *                                 the SLM synthesizes the full session arc, not just
+ *                                 the final segment.
  * @returns Formatted plain-text block, or empty string if no data.
  */
-function buildSynthesisInput(
+export function buildSynthesisInput(
   promptEvents: StoredEvent[],
   decisionEvents: StoredEvent[],
   filesModified: string[],
@@ -111,21 +115,39 @@ function buildSynthesisInput(
   errorsResolved: string[],
   currentTask: string,
   lastAction: string,
+  priorCompactionBriefs?: string[],
 ): string {
   const sections: string[] = [];
+
+  // Prior compaction cycles — prepend before tail so the SLM sees the full
+  // session arc. Each brief summarizes everything up to that compaction point.
+  // The tail events below cover only the most recent cycle.
+  if (priorCompactionBriefs && priorCompactionBriefs.length > 0) {
+    // Cap at 5 most recent cycles — prevents SLM context saturation on very long
+    // sessions. Oldest cycles are already summarized inside the later briefs.
+    const recentBriefs = priorCompactionBriefs.slice(-5);
+    const offset = priorCompactionBriefs.length - recentBriefs.length;
+    sections.push("Session history from prior compaction cycles:");
+    for (let i = 0; i < recentBriefs.length; i++) {
+      sections.push(`[Cycle ${i + 1 + offset}] ${truncateString(recentBriefs[i], 600)}`);
+    }
+    sections.push("--- Current session tail (most recent events) ---");
+  }
 
   // Current state — most important for the next session
   if (currentTask) sections.push(`Current task: ${currentTask}`);
   if (lastAction) sections.push(`Last action: ${lastAction}`);
 
-  // User intent — what they asked for, in order
+  // User intent — what they asked for, in order.
+  // slice(-7) covers the tail of the session; prior cycles are covered above.
   const recentPrompts = promptEvents.slice(-7);
   if (recentPrompts.length > 0) {
     sections.push("User requests (chronological):");
     for (const e of recentPrompts) sections.push(`- ${truncateString(e.data, 150)}`);
   }
 
-  // Decisions — the SLM should detect conflicts and report final state
+  // Decisions — the SLM should detect conflicts and report final state.
+  // Prior-cycle decisions are covered by the priorCompactionBriefs above.
   const recentDecisions = decisionEvents.slice(-7);
   if (recentDecisions.length > 0) {
     sections.push("Decisions made:");
@@ -176,6 +198,10 @@ function buildSynthesisInput(
  * @param transcript  - Parsed transcript context (may be null).
  * @param compressor  - Optional local SLM compressor for synthesis. When absent
  *                      both headline and working_context are derived heuristically.
+ * @param resumeChain - Compaction history chain from getResumeChain(). When present,
+ *                      SLM briefs from prior cycles are prepended to the synthesis
+ *                      input so the handoff covers the full session arc, not just
+ *                      the tail. Pass undefined or empty array for short sessions.
  * @returns HandoffData ready to be written to YAML.
  */
 export async function buildHandoffFromEvents(
@@ -185,6 +211,7 @@ export async function buildHandoffFromEvents(
   workingMem: WorkingMemory | null,
   transcript: TranscriptContext | null,
   compressor?: import("../compression/types.js").Compressor,
+  resumeChain?: ResumeHistoryRow[],
 ): Promise<HandoffData> {
   // Group events by category
   const byCategory: Record<string, StoredEvent[]> = {};
@@ -275,9 +302,18 @@ export async function buildHandoffFromEvents(
   // When the SLM supports diff-mode (grammar-constrained JSON), the structured
   // output also enriches decisions, errors, and blockers with SLM analysis.
   if (compressor) {
+    // Extract SLM briefs from the compaction chain, oldest first.
+    // These cover everything that happened before the final compaction cycle.
+    // Prefer slm_brief (semantic synthesis). Fall back to snapshot (structural XML)
+    // so even old sessions without SLM briefs benefit from the chain.
+    const priorCompactionBriefs = (resumeChain ?? [])
+      .map(row => row.slm_brief ?? row.snapshot)
+      .filter(Boolean) as string[];
+
     const synthesisInput = buildSynthesisInput(
       promptEvents, decisionEvents, filesModified, allErrors,
       errorsResolved, currentTask, lastAction,
+      priorCompactionBriefs,
     );
     if (synthesisInput.trim()) {
       try {

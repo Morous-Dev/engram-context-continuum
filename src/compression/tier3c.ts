@@ -1,22 +1,24 @@
 /**
- * tier3.ts — node-llama-cpp GGUF compressor: Llama 3.2 3B Q5_K_M.
+ * tier3c.ts — node-llama-cpp GGUF compressor: Gemma 3 4B QAT Q4_0.
  *
- * Responsible for: compressing session context using Llama 3.2 3B via
- * node-llama-cpp. Scored 10/10 on adversarial benchmark (code walls, stack
- * traces, pasted articles, error flip-flops, buried tasks, domain jargon).
+ * Responsible for: compressing session context using Gemma 3 4B via
+ * node-llama-cpp. Scored 10/10 on adversarial benchmark. IFEval 90.2% —
+ * highest instruction-following score of any sub-5B model. QAT
+ * (Quantization-Aware Training) preserves near-bfloat16 quality at 2.37 GB,
+ * making this the smallest 10/10 model in the lineup.
  *
- * Output mode: grammar-constrained JSON ("diff-mode"). Instead of free prose,
- * the model fills a structured JSON schema via GBNF grammar. Enums force
- * conservative status choices (UNRESOLVED/RESOLVED/RECURRED) — the model
- * cannot hedge or soften status. Falls back to prose mode if grammar creation
- * fails (e.g., older node-llama-cpp version).
+ * Output mode: grammar-constrained JSON ("diff-mode"). Falls back to prose
+ * if grammar creation fails. Falls back to Tier1 if model is missing.
  *
- * Embeddings are delegated to Tier2Compressor since GGUF chat models
- * do not reliably produce sentence embeddings.
+ * GPU strategy: standard GPU inference — no VRAM estimator bypass needed.
+ * Gemma 3's architecture does not trigger false OOM rejections. Falls back
+ * to CPU if VRAM is genuinely insufficient.
  *
- * Model file: llama-3.2-3b-instruct-q5_k_m.gguf (~2.32 GB)
+ * Note: Gemma 3 4B has no thinking mode — no /no_think prefix required.
+ *
+ * Model file: gemma-3-4b-it-qat-q4_0.gguf (~2.37 GB)
  * Location:   ~/.engram-cc/models/
- * RAM needed:  ~4 GB free
+ * RAM needed:  ~3 GB VRAM (GPU) or ~2.5 GB RAM (CPU)
  *
  * Depends on: node-llama-cpp (optional native npm package),
  *             src/compression/tier1.ts, src/compression/tier2.ts,
@@ -33,16 +35,10 @@ import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
 import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
 
-// ── Model registry ─────────────────────────────────────────────────────────────
+// ── Model file ─────────────────────────────────────────────────────────────────
 
-/** The sole GGUF model: Llama 3.2 3B Q5_K_M. */
-const MODEL_FILE = "llama-3.2-3b-instruct-q5_k_m.gguf";
+const MODEL_FILE = "gemma-3-4b-it-qat-q4_0.gguf";
 
-/**
- * Get the model file path.
- *
- * @returns Absolute path to the GGUF model file.
- */
 function getModelPath(): string {
   return join(homedir(), ".engram-cc", "models", MODEL_FILE);
 }
@@ -50,7 +46,7 @@ function getModelPath(): string {
 // ── Prose fallback prompt ────────────────────────────────────────────────────
 
 /**
- * Build a prose extraction prompt (used when grammar is unavailable).
+ * Build prose prompt (used when grammar is unavailable).
  *
  * @param text     - Preprocessed session data (noise already stripped).
  * @param maxRatio - Target compression ratio.
@@ -85,7 +81,6 @@ function buildProsePrompt(text: string, maxRatio: number): string {
 
 // ── Internal node-llama-cpp types ──────────────────────────────────────────────
 
-// Minimal interfaces to avoid hard-typing the entire node-llama-cpp library.
 interface LlamaInstance {
   loadModel(opts: { modelPath: string }): Promise<LlamaModel>;
   createGrammarForJsonSchema(schema: unknown): Promise<LlamaGrammarInstance>;
@@ -100,12 +95,9 @@ interface LlamaContext {
   dispose(): Promise<void>;
 }
 interface LlamaSequence { [key: string]: unknown; }
-
-/** Grammar instance returned by createGrammarForJsonSchema. */
 interface LlamaGrammarInstance {
   parse(json: string): unknown;
 }
-
 interface PromptOpts {
   maxTokens?: number;
   temperature?: number;
@@ -124,20 +116,19 @@ interface NodeLlamaCppModule {
   LlamaChatSession: new (opts: { contextSequence: LlamaSequence }) => LlamaChatSessionInstance;
 }
 
-// ── Tier3Compressor ────────────────────────────────────────────────────────────
+// ── Tier3cCompressor ───────────────────────────────────────────────────────────
 
 /**
- * Tier3Compressor — GGUF model-based compression via node-llama-cpp.
+ * Tier3cCompressor — high-quality GGUF compression via Gemma 3 4B QAT.
  *
- * compress(): uses grammar-constrained JSON output (diff-mode) when available.
- *             Falls back to prose mode if grammar creation fails.
- *             Falls back to Tier1 if the model is not available at all.
+ * compress(): uses grammar-constrained JSON (diff-mode) when available.
+ *             Falls back to prose, then to Tier1 if unavailable.
  * embed():    delegates to Tier2Compressor (MiniLM-L6-v2 sentence embeddings).
  *
  * The model and grammar are loaded lazily on first compress() call and cached.
  */
-export class Tier3Compressor implements Compressor {
-  readonly tier = "tier3" as const;
+export class Tier3cCompressor implements Compressor {
+  readonly tier = "tier3c" as const;
 
   private readonly modelPath: string;
   private readonly fallback = new Tier1Compressor();
@@ -159,7 +150,7 @@ export class Tier3Compressor implements Compressor {
   }
 
   /**
-   * Lazily load the GGUF model and create the JSON grammar.
+   * Lazily load the Gemma 3 4B QAT model and create the JSON grammar.
    * Returns null if the model file is missing or node-llama-cpp is not installed.
    * Grammar creation failure is non-fatal — falls back to prose mode.
    */
@@ -177,7 +168,7 @@ export class Tier3Compressor implements Compressor {
           try {
             this.grammar = await this.llama.createGrammarForJsonSchema(HANDOFF_SCHEMA);
           } catch {
-            console.error("[EngramCC:tier3] grammar creation failed, falling back to prose mode");
+            console.error("[EngramCC:tier3c] grammar creation failed, falling back to prose mode");
           }
 
           return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx.getSequence() });
@@ -191,7 +182,7 @@ export class Tier3Compressor implements Compressor {
   }
 
   /**
-   * Compress text using the GGUF model. Tries diff-mode (JSON) first,
+   * Compress text using Gemma 3 4B QAT. Tries diff-mode (JSON) first,
    * falls back to prose, falls back to Tier1 if unavailable.
    *
    * @param text     - Text to compress.
@@ -235,8 +226,7 @@ export class Tier3Compressor implements Compressor {
             };
           }
         } catch {
-          // Grammar-constrained generation failed — fall through to prose
-          console.error("[EngramCC:tier3] diff-mode failed, falling back to prose");
+          console.error("[EngramCC:tier3c] diff-mode failed, falling back to prose");
         }
       }
 

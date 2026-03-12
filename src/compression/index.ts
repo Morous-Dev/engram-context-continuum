@@ -7,7 +7,7 @@
  * Compressor, and falling back to lower tiers if the requested one is
  * unavailable. The resulting compressor is cached as a module-level singleton.
  *
- * Fallback chain: tier3c → tier3b → tier3a → tier2 → tier1
+ * Fallback chain: tier3 → tier3b → tier3c → tier2 → tier1
  * Higher tiers always fall back to lower ones on availability failure, so
  * the caller always receives a working Compressor regardless of environment.
  *
@@ -21,11 +21,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import yaml from "js-yaml";
 import type { Compressor, CompressionConfig, CompressionTier } from "./types.js";
-import { detectSystemTier } from "./detect.js";
+import { detectSystemTier, detectHardwareProfile } from "./detect.js";
+import type { HardwareProfile } from "./detect.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { Tier3Compressor } from "./tier3.js";
 import { Tier3bCompressor } from "./tier3b.js";
+import { Tier3cCompressor } from "./tier3c.js";
 import { Tier4Compressor } from "./tier4.js";
 
 // ── Config reader ──────────────────────────────────────────────────────────────
@@ -84,6 +86,7 @@ function instantiateTier(tier: CompressionTier, config: CompressionConfig): Comp
     case "tier4":   return new Tier4Compressor(config.external);
     case "tier3":   return new Tier3Compressor();
     case "tier3b":  return new Tier3bCompressor();
+    case "tier3c":  return new Tier3cCompressor();
     case "tier2":   return new Tier2Compressor();
     case "tier1":
     default:        return new Tier1Compressor();
@@ -93,19 +96,20 @@ function instantiateTier(tier: CompressionTier, config: CompressionConfig): Comp
 /**
  * Ordered fallback chain — highest capability first.
  *
- * tier3  = Llama 3.2 3B Q5_K_M (~2.32 GB) — primary GGUF, scored 3/3
- * tier3b = Qwen 3.5 2B Q5_K_M  (~1.44 GB) — lightweight GGUF, scored 3/3,
- *          auto-falls back to CPU when GPU VRAM is insufficient
+ * tier3  = Llama 3.2 3B Q5_K_M  (~2.32 GB) — default GGUF, 10/10 adversarial
+ * tier3b = Qwen3.5 4B Q4_K_M    (~2.74 GB) — Qwen family, 10/10, strong multilingual
+ * tier3c = Gemma 3 4B QAT Q4_0  (~2.37 GB) — highest IFEval (90.2%), 10/10, smallest 10/10
  * tier2  = ONNX embeddings (rule-based compress, no synthesis)
  * tier1  = rule-based only (always available)
  */
 const FALLBACK_CHAIN: CompressionTier[] = [
-  "tier3", "tier3b", "tier2", "tier1",
+  "tier3", "tier3b", "tier3c", "tier2", "tier1",
 ];
 
-// ── Singleton ──────────────────────────────────────────────────────────────────
+// ── Singletons ─────────────────────────────────────────────────────────────────
 
 let _instance: Compressor | null = null;
+let _hwProfile: HardwareProfile | null = null;
 
 /**
  * Get the singleton Compressor for this process.
@@ -161,6 +165,25 @@ export function getCompressor(): Compressor {
   return _instance;
 }
 
+/**
+ * Get the singleton HardwareProfile for this process.
+ *
+ * Detects GPU VRAM (nvidia-smi / Apple Silicon unified RAM) and maps to
+ * "minimal" | "standard" | "power". Result is cached after first call.
+ *
+ * The profile drives pipeline behavior (parallel vs sequential PreCompact),
+ * independent of which compression tier is selected.
+ *
+ * @returns HardwareProfile for this machine.
+ */
+export function getHardwareProfile(): HardwareProfile {
+  if (_hwProfile) return _hwProfile;
+  _hwProfile = detectHardwareProfile();
+  console.error(`[EngramCC] hardware profile: ${_hwProfile}`);
+  return _hwProfile;
+}
+
 // ── Re-exports for convenience ─────────────────────────────────────────────────
 
-export type { Compressor, CompressionResult, EmbedResult, CompressionTier } from "./types.js";
+export type { Compressor, CompressionResult, EmbedResult, CompressionTier, PromptBuilder } from "./types.js";
+export type { HardwareProfile } from "./detect.js";

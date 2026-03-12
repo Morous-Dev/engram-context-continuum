@@ -328,6 +328,60 @@ function extractMcp(input: HookInput): SessionEvent[] {
   return [{ type: "mcp", category: "mcp", data: truncate(`${toolShort}${argStr}`), priority: 3 }];
 }
 
+/**
+ * Category 16: checkpoint
+ * Infers task progress from tool call patterns. Captures high-level work
+ * milestones so the SLM brief can report "step N done, working on step N+1"
+ * instead of just "implementing feature X".
+ *
+ * Patterns detected:
+ *   - Bash: test/build/lint runs → "verification checkpoint"
+ *   - Bash: git commit → "commit checkpoint" (work was completed and saved)
+ *   - Write: new file creation → "created <file>" checkpoint
+ *   - Edit after Read: "modified <file>" checkpoint (edit cycle complete)
+ */
+function extractCheckpoint(input: HookInput): SessionEvent[] {
+  const { tool_name, tool_input, tool_response } = input;
+  const response = String(tool_response ?? "");
+
+  if (tool_name === "Bash") {
+    const cmd = String(tool_input["command"] ?? "");
+
+    // Test run checkpoint — indicates verification of completed work
+    if (/\b(npm\s+test|npx\s+jest|npx\s+vitest|pytest|cargo\s+test|go\s+test|npm\s+run\s+test)\b/.test(cmd)) {
+      const passed = /pass|ok|success/i.test(response) && !/fail|error/i.test(response);
+      return [{ type: "checkpoint_test", category: "checkpoint", data: truncate(`test run: ${passed ? "PASSED" : "FAILED"} — ${cmd}`, 300), priority: 1 }];
+    }
+
+    // Build checkpoint — indicates compile/transpile step completed
+    if (/\b(npm\s+run\s+build|tsc|npx\s+tsc|cargo\s+build|go\s+build|make\b)/.test(cmd)) {
+      const success = !/(error|fail)/i.test(response);
+      return [{ type: "checkpoint_build", category: "checkpoint", data: truncate(`build: ${success ? "SUCCESS" : "FAILED"} — ${cmd}`, 300), priority: 1 }];
+    }
+
+    // Lint/typecheck checkpoint
+    if (/\b(npm\s+run\s+(lint|typecheck)|npx\s+(eslint|tsc\s+--noEmit)|cargo\s+clippy)\b/.test(cmd)) {
+      const clean = !/(error|warning)/i.test(response);
+      return [{ type: "checkpoint_lint", category: "checkpoint", data: truncate(`lint: ${clean ? "CLEAN" : "ISSUES"} — ${cmd}`, 300), priority: 2 }];
+    }
+
+    // Git commit checkpoint — work was completed and committed
+    if (/\bgit\s+commit\b/.test(cmd)) {
+      const msgMatch = cmd.match(/-m\s+["']([^"']+)["']/);
+      const commitMsg = msgMatch ? msgMatch[1] : "no message";
+      return [{ type: "checkpoint_commit", category: "checkpoint", data: truncate(`committed: ${commitMsg}`, 300), priority: 1 }];
+    }
+  }
+
+  // New file creation checkpoint
+  if (tool_name === "Write") {
+    const filePath = String(tool_input["file_path"] ?? "");
+    return [{ type: "checkpoint_create", category: "checkpoint", data: truncate(`created: ${filePath}`), priority: 2 }];
+  }
+
+  return [];
+}
+
 /** Category 6: decision — AskUserQuestion tool interactions. */
 function extractDecision(input: HookInput): SessionEvent[] {
   if (input.tool_name !== "AskUserQuestion") return [];
@@ -429,6 +483,7 @@ export function extractEvents(input: HookInput): SessionEvent[] {
       ...extractMcp(input),
       ...extractDecision(input),
       ...extractWorktree(input),
+      ...extractCheckpoint(input),
     ];
   } catch {
     return [];

@@ -114,7 +114,7 @@ export class Tier1Compressor implements Compressor {
    * @param maxRatio - Maximum compression ratio ceiling (default 3.0).
    * @returns CompressionResult with compressed text and metrics.
    */
-  async compress(text: string, maxRatio = 3.0): Promise<CompressionResult> {
+  async compress(text: string, maxRatio = 3.0, _promptBuilder?: import("./types.js").PromptBuilder): Promise<CompressionResult> {
     const originalChars = text.length;
     const ratio = Math.max(1.1, Math.min(maxRatio, 20));
     const targetChars = Math.floor(originalChars / ratio);

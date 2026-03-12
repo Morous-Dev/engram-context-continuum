@@ -43,14 +43,25 @@ const MODEL_REGISTRY: Record<string, ModelSpec> = {
     localFile: "llama-3.2-3b-instruct-q5_k_m.gguf",
     sizeDesc: "~2.32 GB",
   },
-  // tier3b: Qwen 3.5 2B — promoted to production tier after scoring 3/3 on
-  // conflict resolution, error truthfulness, and intent extraction benchmarks.
-  // Lighter than tier3 (1.44 GB vs 2.32 GB). Falls back to CPU on VRAM error.
+  // tier3b: Qwen3.5 4B Q4_K_M — scored 10/10 on adversarial benchmark.
+  // Upgraded from Qwen3.5 2B (9/10) which failed A10 (article noise test).
+  // Qwen family: strong multilingual + coding. Has thinking mode (suppressed).
+  // Falls back to CPU on genuine VRAM OOM via ignoreMemorySafetyChecks bypass.
   "tier3b": {
-    hfRepo: "unsloth/Qwen3.5-2B-GGUF",
-    hfFile: "Qwen3.5-2B-Q5_K_M.gguf",
-    localFile: "qwen3.5-2b-q5_k_m.gguf",
-    sizeDesc: "~1.44 GB",
+    hfRepo: "unsloth/Qwen3.5-4B-GGUF",
+    hfFile: "Qwen3.5-4B-Q4_K_M.gguf",
+    localFile: "Qwen3.5-4B-Q4_K_M.gguf",
+    sizeDesc: "~2.74 GB",
+  },
+  // tier3c: Gemma 3 4B QAT Q4_0 — candidate for high-quality tier.
+  // IFEval 90.2% — highest of any sub-5B model (20pts above threshold).
+  // QAT (Quantization-Aware Training) preserves near-bfloat16 quality at 2.37 GB.
+  // No thinking mode to suppress. Pending adversarial benchmark validation.
+  "tier3c": {
+    hfRepo: "bartowski/google_gemma-3-4b-it-qat-GGUF",
+    hfFile: "google_gemma-3-4b-it-qat-Q4_0.gguf",
+    localFile: "gemma-3-4b-it-qat-q4_0.gguf",
+    sizeDesc: "~2.37 GB",
   },
   // REJECTED: SmolLM3 3B produces empty outputs with node-llama-cpp LlamaChatSession.
   // Root cause: chat-template incompatibility — the model generates <think>...</think>

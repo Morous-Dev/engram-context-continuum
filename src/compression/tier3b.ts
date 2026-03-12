@@ -1,28 +1,27 @@
 /**
- * tier3b.ts — node-llama-cpp GGUF compressor: Qwen 3.5 2B Q5_K_M.
+ * tier3b.ts — node-llama-cpp GGUF compressor: Qwen3.5 4B Q4_K_M.
  *
- * Responsible for: compressing session context using Qwen 3.5 2B via
- * node-llama-cpp. This is the lightweight GGUF tier — scored 9/10 on
- * adversarial benchmark. Smaller than tier3 (1.44 GB vs 2.32 GB).
+ * Responsible for: compressing session context using Qwen3.5 4B via
+ * node-llama-cpp. Scored 10/10 on adversarial benchmark. Upgraded from
+ * Qwen3.5 2B (9/10) which failed A10 (long article noise masking real work).
  *
  * Output mode: grammar-constrained JSON ("diff-mode"). Falls back to prose
  * if grammar creation fails. Falls back to Tier1 if model is missing.
  *
  * GPU strategy: tries GPU inference at full 4096 context with
- * ignoreMemorySafetyChecks:true. Qwen 3.5 2B's hybrid DeltaNet/GQA architecture
- * causes node-llama-cpp's VRAM estimator to over-estimate KV cache by 10-100×,
- * triggering false "too large" rejections at ≥1024 ctx despite 15+ GB free VRAM
- * on RTX 5060 Ti (Blackwell SM_120). The bypass lets the actual CUDA allocator
- * decide — a 2B model at 4096 ctx actually uses ~2.5 GB total, well within VRAM.
- * If the GPU load still genuinely fails, retries with gpu:false for CPU-only
- * inference. CPU is slower (~1-3 min) but always works.
+ * ignoreMemorySafetyChecks:true. Qwen3.5's hybrid DeltaNet/GQA architecture
+ * causes node-llama-cpp's VRAM estimator to over-estimate KV cache, triggering
+ * false "too large" rejections despite sufficient free VRAM. The bypass lets
+ * the actual CUDA allocator decide — a 4B Q4_K_M model at 4096 ctx uses
+ * ~3.5 GB total, well within 16 GB VRAM. If the GPU load still genuinely
+ * fails (OOM), retries with gpu:false for CPU-only inference.
  *
- * Note: Qwen 3.5 2B has a thinking mode (generates <think>...</think> blocks).
+ * Note: Qwen3.5 4B has a thinking mode (generates <think>...</think> blocks).
  * The prompt includes /no_think to disable it for fast, direct output.
  *
- * Model file: qwen3.5-2b-q5_k_m.gguf (~1.44 GB)
+ * Model file: Qwen3.5-4B-Q4_K_M.gguf (~2.74 GB)
  * Location:   ~/.engram-cc/models/
- * RAM needed:  ~2.5 GB VRAM (GPU) or ~2 GB RAM (CPU)
+ * RAM needed:  ~3.5 GB VRAM (GPU) or ~3 GB RAM (CPU)
  *
  * Depends on: node-llama-cpp (optional native npm package),
  *             src/compression/tier1.ts, src/compression/tier2.ts,
@@ -41,7 +40,7 @@ import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
 
 // ── Model file ─────────────────────────────────────────────────────────────────
 
-const MODEL_FILE = "qwen3.5-2b-q5_k_m.gguf";
+const MODEL_FILE = "Qwen3.5-4B-Q4_K_M.gguf";
 
 function getModelPath(): string {
   return join(homedir(), ".engram-cc", "models", MODEL_FILE);
@@ -125,7 +124,7 @@ interface NodeLlamaCppModule {
 // ── Tier3bCompressor ───────────────────────────────────────────────────────────
 
 /**
- * Tier3bCompressor — lightweight GGUF compression via Qwen 3.5 2B.
+ * Tier3bCompressor — GGUF compression via Qwen3.5 4B Q4_K_M.
  *
  * compress(): uses grammar-constrained JSON (diff-mode) when available.
  *             Falls back to prose, then to Tier1.
@@ -215,7 +214,7 @@ export class Tier3bCompressor implements Compressor {
    * @param text     - Text to compress.
    * @param maxRatio - Target compression ratio (default 3.0).
    */
-  async compress(text: string, maxRatio = 3.0): Promise<CompressionResult> {
+  async compress(text: string, maxRatio = 3.0, promptBuilder?: import("./types.js").PromptBuilder): Promise<CompressionResult> {
     const session = await this.getOrLoadSession();
     if (!session) return this.fallback.compress(text, maxRatio);
 
@@ -231,7 +230,7 @@ export class Tier3bCompressor implements Compressor {
       if (this.grammar) {
         try {
           // /no_think prepended for Qwen's thinking mode suppression
-          const prompt = `/no_think\n\n${buildDiffModePrompt(cleaned)}`;
+          const prompt = `/no_think\n\n${(promptBuilder ?? buildDiffModePrompt)(cleaned)}`;
           const raw = await session.prompt(prompt, {
             maxTokens,
             temperature: 0.1,

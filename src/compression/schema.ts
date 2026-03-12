@@ -11,7 +11,8 @@
  * handles all formatting — the model only needs to fill in values.
  *
  * Depends on: nothing (pure constants).
- * Depended on by: src/compression/tier3.ts, src/compression/tier3b.ts.
+ * Depended on by: src/compression/tier3.ts, src/compression/tier3b.ts,
+ *                 src/session/compact-brief.ts.
  */
 
 // ── JSON Schema for grammar-constrained output ───────────────────────────────
@@ -101,5 +102,54 @@ export function buildDiffModePrompt(text: string): string {
     `</session_data>`,
     ``,
     `[FOCUS: current_task is the LAST active task. Default error status to UNRESOLVED.]`,
+  ].join("\n");
+}
+
+// ── Compact brief prompt ────────────────────────────────────────────────────
+
+/**
+ * Build a prompt tuned for compaction recovery (not full session handoff).
+ *
+ * The compact brief prompt focuses the SLM on continuation-critical context:
+ * what was being done, what's unfinished, what decisions were made, and what
+ * errors are unresolved. Resolved errors, full file lists, user preferences,
+ * and codebase conventions are de-emphasized.
+ *
+ * Uses the same HANDOFF_SCHEMA for grammar-constrained JSON output.
+ *
+ * @param text - Preprocessed session data (noise already stripped).
+ * @returns Prompt string for grammar-constrained JSON generation.
+ */
+export function buildCompactBriefPrompt(text: string): string {
+  return [
+    `Write a dense continuation brief from this developer session log.`,
+    `The next instance of you will read this to seamlessly continue the user's work.`,
+    `Fill each JSON field based ONLY on explicit facts in the session data.`,
+    ``,
+    `PRIORITIES (most to least important):`,
+    `1. current_task: What was I actively working on? The LAST incomplete task.`,
+    `   Include specific progress: "Step 3 of 5: updated middleware (steps 1-2 done: extracted validateToken, added types)"`,
+    `   Look for checkpoint events (committed, built, tested, created file) to track completed steps.`,
+    `2. task_status: IN_PROGRESS unless explicitly blocked or confirmed complete.`,
+    `3. synthesis: What steps are DONE? What step was IN PROGRESS? What steps REMAIN? 2-3 sentences MAX.`,
+    `   Example: "Completed: schema migration, model types. In progress: API handlers (2 of 5 done). Remaining: tests, UI wiring."`,
+    `4. errors: Only UNRESOLVED errors matter. Skip resolved ones unless they RECURRED.`,
+    `5. decisions: Only decisions that affect continued work. Skip trivial choices.`,
+    `   Include the WHY — "chose PostgreSQL over MongoDB because of RLS support" not just "chose PostgreSQL".`,
+    `6. next_session: The exact next step — not a vague "continue working" but "implement refreshToken handler in auth/jwt.ts".`,
+    ``,
+    `RULES:`,
+    `- Be maximally dense. Every token must carry information.`,
+    `- Track PROGRESS: if you see commits, builds, test runs — those are completed milestones.`,
+    `- Track SEQUENCE: file edits in order show the implementation path. Report what was done vs what remains.`,
+    `- Do NOT repeat the session data back. Synthesize, don't copy.`,
+    `- Do NOT include resolved errors, file lists, or user preferences.`,
+    `- Do NOT infer or extrapolate — state only facts present in the data.`,
+    ``,
+    `<session_data>`,
+    text,
+    `</session_data>`,
+    ``,
+    `[FOCUS: continuation with progress. What steps are DONE? What step was I ON? What steps REMAIN?]`,
   ].join("\n");
 }

@@ -2,8 +2,8 @@
  * db.ts — Persistent per-project SQLite database for session events.
  *
  * Responsible for: storing session events, session metadata, resume snapshots,
- * and FTS5 full-text search over event data. Extends SQLiteBase with all
- * tables needed for Phases 1 and 2.
+ * compaction history chain (session_resume_history), and FTS5 full-text search
+ * over event data. Extends SQLiteBase with all tables needed for Phases 1 and 2.
  *
  * Depends on: src/session/db-base.ts (SQLiteBase, PreparedStatement),
  *             node:crypto (SHA256 hashing for deduplication).
@@ -49,6 +49,23 @@ export interface ResumeRow {
   snapshot: string;
   event_count: number;
   consumed: number;
+  slm_brief: string | null;
+  /** Retrieved engrams XML block from Engram retrieval pipeline, or null. */
+  engram_context: string | null;
+}
+
+/** One row in the compaction history chain — one per compaction cycle. */
+export interface ResumeHistoryRow {
+  /** 1-based compaction cycle number. */
+  compact_index: number;
+  /** Rule-based XML resume snapshot at this compaction point. */
+  snapshot: string;
+  /** SLM-synthesized <session_knowledge> XML, or null if SLM was unavailable. */
+  slm_brief: string | null;
+  /** Number of DB events captured at the time of this compaction. */
+  event_count: number;
+  /** UTC ISO timestamp of when this compaction snapshot was written. */
+  created_at: string;
 }
 
 /** A single FTS5 search result row. */
@@ -91,9 +108,12 @@ const S = {
   upsertResume: "upsertResume",
   getResume: "getResume",
   markResumeConsumed: "markResumeConsumed",
+  appendResumeHistory: "appendResumeHistory",
+  getResumeChain: "getResumeChain",
   deleteEvents: "deleteEvents",
   deleteMeta: "deleteMeta",
   deleteResume: "deleteResume",
+  deleteResumeHistory: "deleteResumeHistory",
   getOldSessions: "getOldSessions",
   ftsSearch: "ftsSearch",
   ftsRebuild: "ftsRebuild",
@@ -166,8 +186,37 @@ export class SessionDB extends SQLiteBase {
         snapshot   TEXT    NOT NULL,
         event_count INTEGER NOT NULL,
         created_at TEXT    NOT NULL DEFAULT (datetime('now')),
-        consumed   INTEGER NOT NULL DEFAULT 0
+        consumed   INTEGER NOT NULL DEFAULT 0,
+        slm_brief  TEXT
       );
+    `);
+
+    // Migration: add slm_brief column to existing session_resume tables
+    try {
+      this.db.exec(`ALTER TABLE session_resume ADD COLUMN slm_brief TEXT`);
+    } catch { /* column already exists */ }
+
+    // Migration: add engram_context column for retrieved engrams from vector/FTS/graph
+    try {
+      this.db.exec(`ALTER TABLE session_resume ADD COLUMN engram_context TEXT`);
+    } catch { /* column already exists */ }
+
+    // Compaction history chain — one row per compaction cycle, append-only.
+    // The stop hook reads the full chain to synthesize end-of-session handoffs
+    // that cover the entire arc of a long multi-compaction session.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_resume_history (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id    TEXT    NOT NULL,
+        compact_index INTEGER NOT NULL,
+        snapshot      TEXT    NOT NULL,
+        slm_brief     TEXT,
+        event_count   INTEGER NOT NULL DEFAULT 0,
+        created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(session_id, compact_index)
+      );
+      CREATE INDEX IF NOT EXISTS idx_srh_session
+        ON session_resume_history(session_id, compact_index);
     `);
 
     // Phase 2: FTS5 full-text search over session event data.
@@ -266,23 +315,42 @@ export class SessionDB extends SQLiteBase {
       `UPDATE session_meta SET compact_count = compact_count + 1 WHERE session_id = ?`);
 
     p(S.upsertResume,
-      `INSERT INTO session_resume (session_id, snapshot, event_count)
-       VALUES (?, ?, ?)
+      `INSERT INTO session_resume (session_id, snapshot, event_count, slm_brief, engram_context)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(session_id) DO UPDATE SET
          snapshot = excluded.snapshot,
          event_count = excluded.event_count,
+         slm_brief = excluded.slm_brief,
+         engram_context = excluded.engram_context,
          created_at = datetime('now'),
          consumed = 0`);
 
     p(S.getResume,
-      `SELECT snapshot, event_count, consumed FROM session_resume WHERE session_id = ?`);
+      `SELECT snapshot, event_count, consumed, slm_brief, engram_context FROM session_resume WHERE session_id = ?`);
 
     p(S.markResumeConsumed,
       `UPDATE session_resume SET consumed = 1 WHERE session_id = ?`);
 
-    p(S.deleteEvents, `DELETE FROM session_events WHERE session_id = ?`);
-    p(S.deleteMeta,   `DELETE FROM session_meta   WHERE session_id = ?`);
-    p(S.deleteResume, `DELETE FROM session_resume WHERE session_id = ?`);
+    p(S.appendResumeHistory,
+      `INSERT INTO session_resume_history
+         (session_id, compact_index, snapshot, slm_brief, event_count)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, compact_index) DO UPDATE SET
+         snapshot    = excluded.snapshot,
+         slm_brief   = excluded.slm_brief,
+         event_count = excluded.event_count,
+         created_at  = datetime('now')`);
+
+    p(S.getResumeChain,
+      `SELECT compact_index, snapshot, slm_brief, event_count, created_at
+       FROM session_resume_history
+       WHERE session_id = ?
+       ORDER BY compact_index ASC`);
+
+    p(S.deleteEvents,        `DELETE FROM session_events         WHERE session_id = ?`);
+    p(S.deleteMeta,          `DELETE FROM session_meta           WHERE session_id = ?`);
+    p(S.deleteResume,        `DELETE FROM session_resume         WHERE session_id = ?`);
+    p(S.deleteResumeHistory, `DELETE FROM session_resume_history WHERE session_id = ?`);
 
     p(S.getOldSessions,
       `SELECT session_id FROM session_meta WHERE started_at < datetime('now', ? || ' days')`);
@@ -417,9 +485,13 @@ export class SessionDB extends SQLiteBase {
   // Resume
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /** Upsert a resume snapshot for a session. Resets consumed flag on update. */
-  upsertResume(sessionId: string, snapshot: string, eventCount?: number): void {
-    this.stmt(S.upsertResume).run(sessionId, snapshot, eventCount ?? 0);
+  /**
+   * Upsert a resume snapshot for a session. Resets consumed flag on update.
+   * Used by sessionstart.mjs for immediate post-compaction context injection.
+   * This remains an overwrite — sessionstart only needs the latest snapshot.
+   */
+  upsertResume(sessionId: string, snapshot: string, eventCount?: number, slmBrief?: string | null, engramContext?: string | null): void {
+    this.stmt(S.upsertResume).run(sessionId, snapshot, eventCount ?? 0, slmBrief ?? null, engramContext ?? null);
   }
 
   /** Retrieve the resume snapshot for a session. */
@@ -432,15 +504,50 @@ export class SessionDB extends SQLiteBase {
     this.stmt(S.markResumeConsumed).run(sessionId);
   }
 
+  /**
+   * Append one compaction cycle's data to the history chain.
+   * Called by precompact.mjs on every compaction — one row per cycle, never overwritten.
+   * The stop hook reads the full chain via getResumeChain() to synthesize end-of-session
+   * handoffs that cover the entire arc of a long multi-compaction session.
+   *
+   * @param sessionId    - Session UUID.
+   * @param compactIndex - 1-based compaction cycle number.
+   * @param snapshot     - Rule-based XML resume snapshot at this compaction point.
+   * @param slmBrief     - SLM-synthesized <session_knowledge> XML, or null.
+   * @param eventCount   - Total DB events at the time of this compaction.
+   */
+  appendResumeHistory(
+    sessionId: string,
+    compactIndex: number,
+    snapshot: string,
+    slmBrief: string | null,
+    eventCount: number,
+  ): void {
+    this.stmt(S.appendResumeHistory).run(sessionId, compactIndex, snapshot, slmBrief, eventCount);
+  }
+
+  /**
+   * Return all compaction snapshots for a session in chronological order.
+   * Returns an empty array if the session never compacted or the history table
+   * is empty (short sessions, sessions from before this feature was deployed).
+   *
+   * @param sessionId - Session UUID.
+   * @returns Array of ResumeHistoryRow ordered by compact_index ASC.
+   */
+  getResumeChain(sessionId: string): ResumeHistoryRow[] {
+    return this.stmt(S.getResumeChain).all(sessionId) as ResumeHistoryRow[];
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Lifecycle
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /** Delete all data for a session (events, meta, resume). */
+  /** Delete all data for a session (events, meta, resume, resume history). */
   deleteSession(sessionId: string): void {
     this.db.transaction(() => {
       this.stmt(S.deleteEvents).run(sessionId);
       this.stmt(S.deleteResume).run(sessionId);
+      this.stmt(S.deleteResumeHistory).run(sessionId);
       this.stmt(S.deleteMeta).run(sessionId);
     })();
   }

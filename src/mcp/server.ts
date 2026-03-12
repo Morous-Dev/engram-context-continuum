@@ -312,6 +312,94 @@ server.tool(
   },
 );
 
+// ── Tool: semantic_search ────────────────────────────────────────────────────
+
+/**
+ * semantic_search — "What did we decide about databases?" (meaning-based)
+ * Vector similarity search over embedded session events using sqlite-vec.
+ * Unlike FTS5 keyword search, this finds semantically similar content even
+ * when exact words don't match (e.g., "database choice" finds "PostgreSQL
+ * selected over MongoDB").
+ *
+ * This is the mid-conversation retrieval tool — Claude can call it anytime,
+ * not just at compaction boundaries. It queries the same vec_procedures table
+ * that the Stop hook populates with embeddings of decisions, errors, tasks,
+ * and rules.
+ *
+ * Parameters:
+ *   query      — natural language query (embedded via MiniLM-L6-v2)
+ *   projectDir — defaults to process.cwd()
+ *   limit      — max results, default 10
+ */
+server.tool(
+  "semantic_search",
+  "Semantic similarity search over session memory. Finds related decisions, errors, and context by meaning, not just keywords. Use when keyword search fails or when you need conceptually related facts.",
+  {
+    query: z.string().describe("Natural language query describing what you're looking for."),
+    projectDir: z.string().optional().describe("Project directory. Defaults to cwd."),
+    limit: z.number().int().min(1).max(25).optional().describe("Max results. Default 10."),
+  },
+  async ({ query, projectDir, limit = 10 }) => {
+    const dir = projectDir ?? process.cwd();
+    const dbPath = getDbPath(dir);
+
+    if (!existsSync(dbPath)) {
+      return { content: [{ type: "text", text: `No session DB found for: ${dir}` }] };
+    }
+
+    try {
+      // Lazy-load vector and embedding dependencies
+      const { VectorDB } = await import("../memory/vector.js");
+      const { getCompressor } = await import("../compression/index.js");
+
+      const vectorDB = new VectorDB(dbPath);
+
+      if (!vectorDB.isAvailable()) {
+        vectorDB.close();
+        return {
+          content: [{ type: "text", text: "Vector search unavailable (sqlite-vec not loaded). Use the 'search' tool for keyword-based search instead." }],
+        };
+      }
+
+      // Generate query embedding using the compressor's embed pipeline (MiniLM-L6-v2)
+      const compressor = getCompressor();
+      const embedResult = await compressor.embed([query]);
+
+      if (embedResult.embeddings.length === 0 || embedResult.dimensions === 0) {
+        vectorDB.close();
+        return {
+          content: [{ type: "text", text: "Embedding generation failed. Use the 'search' tool for keyword-based search instead." }],
+        };
+      }
+
+      const results = vectorDB.search(embedResult.embeddings[0], limit);
+      vectorDB.close();
+
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: `No semantic matches for: "${query}"` }] };
+      }
+
+      const lines = [`# Semantic search: "${query}" (${results.length} matches)\n`];
+      for (const r of results) {
+        const confidence = Math.max(0, 1.0 - r.distance).toFixed(2);
+        const meta = r.metadata as Record<string, unknown>;
+        const cat = typeof meta.category === "string" ? meta.category : "unknown";
+        const typ = typeof meta.type === "string" ? meta.type : "";
+        lines.push(`**[${cat}${typ ? "/" + typ : ""}]** (confidence: ${confidence})`);
+        lines.push(`  ${r.content.slice(0, 400)}`);
+        lines.push("");
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Semantic search failed: ${msg}\nFallback: use the 'search' tool for keyword search.` }],
+      };
+    }
+  },
+);
+
 // ── Tool: graph_query ────────────────────────────────────────────────────────
 
 /**

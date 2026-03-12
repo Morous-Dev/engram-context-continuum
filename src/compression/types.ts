@@ -17,11 +17,17 @@
  * tier2 = @huggingface/transformers ONNX (embeddings + rule-based compress)
  * tier3  = node-llama-cpp + Llama 3.2 3B Q5_K_M (~2.32 GB, ≥4 GB RAM)
  *          Scored 3/3 on conflict resolution, error truthfulness, and intent extraction.
- * tier3b = node-llama-cpp + Qwen 3.5 2B Q5_K_M (~1.44 GB, ≥2 GB RAM)
- *          Scored 3/3 in quality tests. Lighter than tier3 — suitable for machines
- *          with limited GPU VRAM. Falls back to CPU inference automatically.
+ * tier3b = node-llama-cpp + Qwen3.5 4B Q4_K_M (~2.74 GB, ≥3 GB RAM)
+ *          Scored 10/10 on adversarial benchmark. Qwen family — strong multilingual
+ *          and coding. Has thinking mode (suppressed via /no_think). Falls back
+ *          to CPU inference automatically via ignoreMemorySafetyChecks bypass.
+ *          (Qwen3.5 2B Q5_K_M was prior tier3b at 1.44 GB / 9/10 — replaced.)
  *          (SmolLM3 3B was evaluated and rejected: produces empty output due to
  *          chat-template incompatibility with node-llama-cpp LlamaChatSession.)
+ * tier3c = node-llama-cpp + Gemma 3 4B QAT Q4_0 (~2.37 GB, ≥3 GB RAM)
+ *          Scored 10/10 on adversarial benchmark. IFEval 90.2% — highest of any
+ *          sub-5B model. QAT (Quantization-Aware Training) preserves near-bfloat16
+ *          quality. No thinking mode to suppress. Smallest 10/10 model.
  * tier4  = external HTTP provider (Ollama / LM Studio / Groq / Claude API)
  */
 export type CompressionTier =
@@ -29,6 +35,7 @@ export type CompressionTier =
   | "tier2"
   | "tier3"
   | "tier3b"
+  | "tier3c"
   | "tier4";
 
 // ── Structured handoff (diff-mode) ─────────────────────────────────────────────
@@ -101,6 +108,15 @@ export interface EmbedResult {
   tier: CompressionTier;
 }
 
+// ── Prompt builder type ──────────────────────────────────────────────────────
+
+/**
+ * A function that builds an SLM prompt from preprocessed session text.
+ * Used to customize the prompt for different contexts (handoff vs compaction).
+ * When not provided, tiers default to buildDiffModePrompt.
+ */
+export type PromptBuilder = (text: string) => string;
+
 // ── Compressor interface ───────────────────────────────────────────────────────
 
 /**
@@ -119,12 +135,15 @@ export interface Compressor {
   /**
    * Compress a text string by up to maxRatio.
    *
-   * @param text     - The text to compress.
-   * @param maxRatio - Target compression ratio ceiling (default 3.0).
-   *                   The actual ratio may be lower if the text is short.
+   * @param text          - The text to compress.
+   * @param maxRatio      - Target compression ratio ceiling (default 3.0).
+   *                        The actual ratio may be lower if the text is short.
+   * @param promptBuilder - Optional custom prompt builder for diff-mode JSON.
+   *                        When provided, overrides the default buildDiffModePrompt.
+   *                        Ignored by tiers that don't use SLM prompts (tier1, tier2).
    * @returns CompressionResult with the compressed text and metrics.
    */
-  compress(text: string, maxRatio?: number): Promise<CompressionResult>;
+  compress(text: string, maxRatio?: number, promptBuilder?: PromptBuilder): Promise<CompressionResult>;
 
   /**
    * Generate embedding vectors for an array of texts.

@@ -43,6 +43,21 @@ memory:
   # Graph memory: maximum BFS traversal depth for neighbor queries.
   graph_max_depth: 3
 
+# ── Hardware Profiles ───────────────────────────────────────────────────────
+# Detected automatically at runtime. Controls pipeline execution strategy.
+#
+#   minimal  — no discrete GPU or VRAM < 4 GB (integrated graphics, low RAM)
+#              Single model, sequential pipeline. Laptops and low-end machines.
+#
+#   standard — VRAM 4–11 GB (RTX 3060/4060/etc.) or x86 system RAM ≥ 16 GB
+#              Sequential pipeline, GPU-assisted model inference.
+#
+#   power    — VRAM ≥ 12 GB (RTX 3090/4090/A100) or Apple Silicon ≥ 16 GB RAM
+#              Parallel PreCompact pipeline: SLM brief (GPU) and engram retrieval
+#              (CPU/MiniLM) run concurrently, cutting compaction latency in half.
+#
+# The profile is read-only — it cannot be forced via config (hardware is hardware).
+
 # ── AI Compression Tiers ────────────────────────────────────────────────────
 # Tier 1: Rule-based (always active, zero size)
 # Tier 2: @huggingface/transformers + Qwen3-0.6B-ONNX (~400 MB, pure npm)
