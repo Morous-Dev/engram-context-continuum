@@ -67,11 +67,12 @@ export class GeminiCliAdapter implements AssistantAdapter {
       if (!settings.hooks) settings.hooks = {};
 
       const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
+      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
       const hookDefs: Array<[string, string]> = [
         ["AfterTool",    `node "${hooksDir}/posttooluse.mjs"`],
         ["PreCompress",  `node "${hooksDir}/precompact.mjs"`],
         ["SessionStart", `node "${hooksDir}/sessionstart.mjs"`],
-        ["SessionEnd",   `bun run "${hooksDir}/stop.ts"`],
+        ["SessionEnd",   `node "${buildDir}/stop.js"`],
       ];
 
       let registered = 0;

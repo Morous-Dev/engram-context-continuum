@@ -72,12 +72,13 @@ export class VSCodeCopilotAdapter implements AssistantAdapter {
       if (!config.hooks) config.hooks = {};
 
       const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
+      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
       const hookDefs: Array<[string, string]> = [
         ["PostToolUse",      `node "${hooksDir}/posttooluse.mjs"`],
         ["PreCompact",       `node "${hooksDir}/precompact.mjs"`],
         ["SessionStart",     `node "${hooksDir}/sessionstart.mjs"`],
         ["UserPromptSubmit", `node "${hooksDir}/userpromptsubmit.mjs"`],
-        ["Stop",             `bun run "${hooksDir}/stop.ts"`],
+        ["Stop",             `node "${buildDir}/stop.js"`],
       ];
 
       let registered = 0;

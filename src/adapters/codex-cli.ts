@@ -83,10 +83,11 @@ export class CodexCliAdapter implements AssistantAdapter {
       }
 
       const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
+      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
       let content = existing;
       content = appendTomlHook(content, "session_start", `node "${hooksDir}/sessionstart.mjs"`);
       content = appendTomlHook(content, "pre_tool_use",  `node "${hooksDir}/posttooluse.mjs"`);
-      content = appendTomlHook(content, "stop",          `bun run "${hooksDir}/stop.ts"`);
+      content = appendTomlHook(content, "stop",          `node "${buildDir}/stop.js"`);
 
       writeFileSync(CONFIG_PATH, content, "utf-8");
       return { success: true, skipped: false, message: `Registered 3 hooks in ${CONFIG_PATH}` };

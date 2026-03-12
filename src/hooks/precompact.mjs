@@ -29,7 +29,7 @@ import "./suppress-stderr.mjs";
  */
 
 import { readStdin, getSessionId, getSessionDBPath } from "./session-helpers.mjs";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -39,7 +39,9 @@ const PROJECT_ROOT = join(HOOK_DIR, "..", "..");
 const BUILD_SESSION = join(PROJECT_ROOT, "build", "session");
 const BUILD_TOKEN = join(PROJECT_ROOT, "build", "tokenization");
 const BUILD_COMPRESS = join(PROJECT_ROOT, "build", "compression");
-const DEBUG_LOG = join(homedir(), ".claude", "super-context", "precompact-debug.log");
+const LOG_DIR   = join(homedir(), ".engram-cc", "logs");
+const DEBUG_LOG = join(LOG_DIR, "precompact-debug.log");
+try { mkdirSync(LOG_DIR, { recursive: true }); } catch { /* already exists */ }
 
 try {
   const raw = await readStdin();

@@ -81,11 +81,12 @@ export class OpenCodeAdapter implements AssistantAdapter {
       if (!config.hooks) config.hooks = {};
 
       const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
+      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
       const hookDefs: Array<[string, string]> = [
         ["afterToolUse",   `node "${hooksDir}/posttooluse.mjs"`],
         ["beforeCompress", `node "${hooksDir}/precompact.mjs"`],
         ["sessionStart",   `node "${hooksDir}/sessionstart.mjs"`],
-        ["sessionEnd",     `bun run "${hooksDir}/stop.ts"`],
+        ["sessionEnd",     `node "${buildDir}/stop.js"`],
       ];
 
       let registered = 0;

@@ -122,7 +122,10 @@ try {
     try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
 
     if (previousWasFresh) {
-      db.cleanupOldSessions(0);
+      // Use 1-day window, not 0 — cleanupOldSessions(0) passes '-0 days' to SQLite
+      // which resolves to datetime('now'), deleting every session started before right
+      // now (i.e. everything). 1 day keeps today's sessions while pruning older ones.
+      db.cleanupOldSessions(1);
     } else {
       db.cleanupOldSessions(7);
     }
