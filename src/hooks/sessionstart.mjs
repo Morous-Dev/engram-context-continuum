@@ -121,14 +121,12 @@ try {
     let previousWasFresh = false;
     try { readFileSync(cleanupFlag); previousWasFresh = true; } catch { /* no flag */ }
 
-    if (previousWasFresh) {
-      // Use 1-day window, not 0 — cleanupOldSessions(0) passes '-0 days' to SQLite
-      // which resolves to datetime('now'), deleting every session started before right
-      // now (i.e. everything). 1 day keeps today's sessions while pruning older ones.
-      db.cleanupOldSessions(1);
-    } else {
-      db.cleanupOldSessions(7);
-    }
+    // Always use 7-day window. The previous cleanupOldSessions(0) on double-fresh-start
+    // was a bug — datetime('now', '-0 days') = now, which deleted every session ever
+    // created. There is no benefit to a shorter window here: the stop hook distills
+    // important facts into graph/vector/yaml before cleanup ever runs, and FTS5 search
+    // over the raw event log should stay available for the full 7-day rolling window.
+    db.cleanupOldSessions(7);
     // Orphan cleanup: events without matching meta rows
     db.db.exec(`DELETE FROM session_events WHERE session_id NOT IN (SELECT session_id FROM session_meta)`);
 
