@@ -555,11 +555,16 @@ export class SessionDB extends SQLiteBase {
   /**
    * Remove sessions older than maxAgeDays.
    *
-   * @param maxAgeDays - Sessions older than this are deleted (default 7).
-   * @returns Count of sessions deleted.
+   * Non-positive or non-finite values are rejected as a safe no-op — passing 0
+   * would produce datetime('now', '-0 days') = now, deleting every session ever
+   * created. Math.floor prevents fractional-day string injection into the SQL.
+   *
+   * @param maxAgeDays - Sessions older than this are deleted (default 7, must be > 0).
+   * @returns Count of sessions deleted, or 0 if maxAgeDays is invalid.
    */
   cleanupOldSessions(maxAgeDays = 7): number {
-    const oldSessions = this.stmt(S.getOldSessions).all(`-${maxAgeDays}`) as Array<{ session_id: string }>;
+    if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) return 0;
+    const oldSessions = this.stmt(S.getOldSessions).all(`-${Math.floor(maxAgeDays)}`) as Array<{ session_id: string }>;
     for (const { session_id } of oldSessions) this.deleteSession(session_id);
     return oldSessions.length;
   }
