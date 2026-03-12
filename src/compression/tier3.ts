@@ -2,10 +2,14 @@
  * tier3.ts — node-llama-cpp GGUF compressor: Llama 3.2 3B Q5_K_M.
  *
  * Responsible for: compressing session context using Llama 3.2 3B via
- * node-llama-cpp. This is the sole GGUF model — selected after quality
- * testing where it scored 3/3 on code-awareness, conflict resolution,
- * and intent extraction. Qwen 2.5 1.5B and Phi-4 Mini were removed:
- * both hallucinated that unresolved errors were fixed.
+ * node-llama-cpp. Scored 10/10 on adversarial benchmark (code walls, stack
+ * traces, pasted articles, error flip-flops, buried tasks, domain jargon).
+ *
+ * Output mode: grammar-constrained JSON ("diff-mode"). Instead of free prose,
+ * the model fills a structured JSON schema via GBNF grammar. Enums force
+ * conservative status choices (UNRESOLVED/RESOLVED/RECURRED) — the model
+ * cannot hedge or soften status. Falls back to prose mode if grammar creation
+ * fails (e.g., older node-llama-cpp version).
  *
  * Embeddings are delegated to Tier2Compressor since GGUF chat models
  * do not reliably produce sentence embeddings.
@@ -15,17 +19,19 @@
  * RAM needed:  ~4 GB free
  *
  * Depends on: node-llama-cpp (optional native npm package),
- *             src/compression/tier1.ts, src/compression/tier2.ts.
+ *             src/compression/tier1.ts, src/compression/tier2.ts,
+ *             src/compression/schema.ts, src/compression/preprocess.ts.
  * Depended on by: src/compression/index.ts.
  */
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { Compressor, CompressionResult, EmbedResult, CompressionTier } from "./types.js";
+import type { Compressor, CompressionResult, EmbedResult, StructuredHandoff } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
+import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
 
 // ── Model registry ─────────────────────────────────────────────────────────────
 
@@ -41,29 +47,16 @@ function getModelPath(): string {
   return join(homedir(), ".engram-cc", "models", MODEL_FILE);
 }
 
-// ── Compression prompt ─────────────────────────────────────────────────────────
+// ── Prose fallback prompt ────────────────────────────────────────────────────
 
 /**
- * Build a structured extraction prompt for the GGUF model.
- *
- * Designed for maximum faithfulness based on summarization research:
- *   - Explicit imperative rules outperform vague instructions in small models
- *   - Rules 3 and 4 directly address the two hardest failure modes:
- *     error flip-flop (briefly fixed then recurred = still open) and
- *     buried current task (last active task, not the most-mentioned one)
- *   - XML tags delimit trusted instructions from untrusted session data,
- *     preventing session content from overriding system rules
- *   - Signal anchor at the end counteracts the "lost in the middle" effect
- *     (U-shaped recall curve in small models)
- *   - Role framing shifts the model's prior toward precise, non-creative output
- *
- * Sources: arxiv 2507.05123, arxiv 2512.03503, Chroma Context Rot research.
+ * Build a prose extraction prompt (used when grammar is unavailable).
  *
  * @param text     - Preprocessed session data (noise already stripped).
  * @param maxRatio - Target compression ratio.
  * @returns Formatted prompt string.
  */
-function buildCompressionPrompt(text: string, maxRatio: number): string {
+function buildProsePrompt(text: string, maxRatio: number): string {
   const targetWords = Math.floor(text.split(/\s+/).length / maxRatio);
   return [
     `You are a senior software engineer writing a precise handoff brief for the next engineer.`,
@@ -92,10 +85,10 @@ function buildCompressionPrompt(text: string, maxRatio: number): string {
 
 // ── Internal node-llama-cpp types ──────────────────────────────────────────────
 
-// node-llama-cpp exports getLlama and LlamaChatSession.
-// We use a minimal interface to avoid hard-typing the entire library.
+// Minimal interfaces to avoid hard-typing the entire node-llama-cpp library.
 interface LlamaInstance {
   loadModel(opts: { modelPath: string }): Promise<LlamaModel>;
+  createGrammarForJsonSchema(schema: unknown): Promise<LlamaGrammarInstance>;
   dispose(): Promise<void>;
 }
 interface LlamaModel {
@@ -107,13 +100,20 @@ interface LlamaContext {
   dispose(): Promise<void>;
 }
 interface LlamaSequence { [key: string]: unknown; }
+
+/** Grammar instance returned by createGrammarForJsonSchema. */
+interface LlamaGrammarInstance {
+  parse(json: string): unknown;
+}
+
 interface PromptOpts {
   maxTokens?: number;
-  temperature?: number;       // 0 = greedy (maximizes faithfulness)
-  topK?: number;              // 1 = greedy (deterministic)
+  temperature?: number;
+  topK?: number;
   topP?: number;
   minP?: number;
   repeatPenalty?: number | { penalty: number; lastTokens?: number };
+  grammar?: LlamaGrammarInstance;
 }
 interface LlamaChatSessionInstance {
   prompt(text: string, opts?: PromptOpts): Promise<string>;
@@ -129,13 +129,12 @@ interface NodeLlamaCppModule {
 /**
  * Tier3Compressor — GGUF model-based compression via node-llama-cpp.
  *
- * compress(): uses the GGUF model to generate a high-quality summary.
- *             Falls back to Tier1 if the model is not available.
+ * compress(): uses grammar-constrained JSON output (diff-mode) when available.
+ *             Falls back to prose mode if grammar creation fails.
+ *             Falls back to Tier1 if the model is not available at all.
  * embed():    delegates to Tier2Compressor (MiniLM-L6-v2 sentence embeddings).
  *
- * The model is loaded lazily on first compress() call and cached for the
- * lifetime of the compressor. Both llama and model are disposed on GC or
- * explicit dispose() call.
+ * The model and grammar are loaded lazily on first compress() call and cached.
  */
 export class Tier3Compressor implements Compressor {
   readonly tier = "tier3" as const;
@@ -148,10 +147,10 @@ export class Tier3Compressor implements Compressor {
   private llama: LlamaInstance | null = null;
   private model: LlamaModel | null = null;
   private ctx: LlamaContext | null = null;
+  private grammar: LlamaGrammarInstance | null = null;
 
   constructor() {
     this.modelPath = getModelPath();
-    // Pre-check model file existence — node-llama-cpp itself is checked at load time
     this._available = existsSync(this.modelPath);
   }
 
@@ -160,21 +159,27 @@ export class Tier3Compressor implements Compressor {
   }
 
   /**
-   * Lazily load the GGUF model via node-llama-cpp.
+   * Lazily load the GGUF model and create the JSON grammar.
    * Returns null if the model file is missing or node-llama-cpp is not installed.
+   * Grammar creation failure is non-fatal — falls back to prose mode.
    */
   private getOrLoadSession(): Promise<LlamaChatSessionInstance | null> {
     if (!this.loadPromise) {
       this.loadPromise = (async (): Promise<LlamaChatSessionInstance | null> => {
         if (!this._available) return null;
         try {
-          // Dynamic import — node-llama-cpp is an optional native addon
           const llamaCpp = await import("node-llama-cpp") as unknown as NodeLlamaCppModule;
           this.llama = await llamaCpp.getLlama();
           this.model = await this.llama.loadModel({ modelPath: this.modelPath });
-          // 4096-token context: enough for structured session data + synthesis output.
-          // Phi-4 Mini supports 128K but we cap at 4096 to keep RAM and latency bounded.
           this.ctx = await this.model.createContext({ contextSize: 4096 });
+
+          // Create grammar for structured JSON output. Non-fatal if unsupported.
+          try {
+            this.grammar = await this.llama.createGrammarForJsonSchema(HANDOFF_SCHEMA);
+          } catch {
+            console.error("[EngramCC:tier3] grammar creation failed, falling back to prose mode");
+          }
+
           return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx.getSequence() });
         } catch {
           this._available = false;
@@ -186,7 +191,8 @@ export class Tier3Compressor implements Compressor {
   }
 
   /**
-   * Compress text using the GGUF model. Falls back to Tier 1 if unavailable.
+   * Compress text using the GGUF model. Tries diff-mode (JSON) first,
+   * falls back to prose, falls back to Tier1 if unavailable.
    *
    * @param text     - Text to compress.
    * @param maxRatio - Target compression ratio (default 3.0).
@@ -197,16 +203,50 @@ export class Tier3Compressor implements Compressor {
 
     try {
       const cleaned = preprocessSessionData(text);
-      const prompt = buildCompressionPrompt(cleaned, maxRatio);
-      // Target output: input words / ratio, with a floor of 150 tokens and cap of 500
-      // to prevent both truncation and runaway generation.
       const targetTokens = Math.ceil(cleaned.split(/\s+/).length / maxRatio * 1.5);
-      const maxTokens = Math.max(150, Math.min(targetTokens, 500));
+      // JSON is ~50% more token-heavy than prose; grammar mode gets a higher cap.
+      const maxTokens = this.grammar
+        ? Math.max(300, Math.min(targetTokens, 800))
+        : Math.max(200, Math.min(targetTokens, 600));
+
+      // ── Diff-mode: grammar-constrained JSON output ────────────────────────
+      if (this.grammar) {
+        try {
+          const prompt = buildDiffModePrompt(cleaned);
+          const raw = await session.prompt(prompt, {
+            maxTokens,
+            temperature: 0.1,
+            topK: 1,
+            repeatPenalty: 1.05,
+            grammar: this.grammar,
+          });
+
+          const parsed = this.grammar.parse(raw) as StructuredHandoff;
+          if (parsed && parsed.current_task) {
+            const compressed = JSON.stringify(parsed);
+            return {
+              compressed,
+              originalChars: text.length,
+              compressedChars: compressed.length,
+              ratio: text.length / Math.max(compressed.length, 1),
+              tier: this.tier,
+              format: "json",
+              structured: parsed,
+            };
+          }
+        } catch {
+          // Grammar-constrained generation failed — fall through to prose
+          console.error("[EngramCC:tier3] diff-mode failed, falling back to prose");
+        }
+      }
+
+      // ── Prose fallback ────────────────────────────────────────────────────
+      const prompt = buildProsePrompt(cleaned, maxRatio);
       const summary = await session.prompt(prompt, {
         maxTokens,
-        temperature: 0.1,     // near-greedy — maximizes faithfulness while allowing richer outputs than temperature=0
-        topK: 1,              // deterministic selection of highest-probability token
-        repeatPenalty: 1.05,  // light penalty to prevent token looping; >1.2 causes model to avoid input terms
+        temperature: 0.1,
+        topK: 1,
+        repeatPenalty: 1.05,
       });
 
       const compressed = summary.trim();
@@ -218,6 +258,7 @@ export class Tier3Compressor implements Compressor {
         compressedChars: compressed.length,
         ratio: text.length / Math.max(compressed.length, 1),
         tier: this.tier,
+        format: "prose",
       };
     } catch {
       return this.fallback.compress(text, maxRatio);
@@ -226,7 +267,6 @@ export class Tier3Compressor implements Compressor {
 
   /**
    * Delegate embedding generation to Tier2Compressor (MiniLM-L6-v2).
-   * GGUF chat models do not produce reliable sentence embeddings.
    *
    * @param texts - Strings to embed.
    */

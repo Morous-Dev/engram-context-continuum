@@ -119,6 +119,8 @@ export function formatHandoffForContext(handoff: HandoffData): string {
     lines.push("  </errors_encountered>");
   }
 
+  // Blockers may contain SLM-enriched status tags like [UNRESOLVED] or [RECURRED].
+  // These are high-signal for the next session — displayed prominently.
   if (handoff.blockers.length > 0) {
     lines.push("  <blockers>");
     for (const b of handoff.blockers) lines.push(`    - ${b}`);

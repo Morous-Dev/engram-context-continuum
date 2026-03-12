@@ -31,11 +31,45 @@ export type CompressionTier =
   | "tier3b"
   | "tier4";
 
+// ── Structured handoff (diff-mode) ─────────────────────────────────────────────
+
+/**
+ * Machine-readable handoff brief produced by grammar-constrained SLM output.
+ *
+ * Instead of free prose, the SLM fills this schema via GBNF grammar constraints.
+ * Enums force conservative status choices — the model cannot soften "UNRESOLVED"
+ * into ambiguous phrasing like "may need further investigation."
+ *
+ * This is the SLM's ANALYSIS — it may differ from rule-based extraction when
+ * there are decision conflicts, error flip-flops, or buried current tasks.
+ */
+export interface StructuredHandoff {
+  /** The last active, incomplete task (SLM-identified, not the most-mentioned). */
+  current_task: string;
+  /** Conservative task status: IN_PROGRESS unless explicitly blocked or confirmed done. */
+  task_status: "IN_PROGRESS" | "BLOCKED" | "COMPLETE";
+  /** 2-3 sentence factual synthesis of session outcomes. */
+  synthesis: string;
+  /** Key decisions with explicit final/reverted status. */
+  decisions: Array<{
+    topic: string;
+    decision: string;
+    status: "FINAL" | "TENTATIVE" | "REVERTED";
+  }>;
+  /** Errors with conservative status: UNRESOLVED unless log confirms fix. */
+  errors: Array<{
+    description: string;
+    status: "UNRESOLVED" | "RESOLVED" | "RECURRED";
+  }>;
+  /** What the next engineer should start with. */
+  next_session: string;
+}
+
 // ── Result types ───────────────────────────────────────────────────────────────
 
 /** Result from a compress() call. */
 export interface CompressionResult {
-  /** The compressed text. */
+  /** The compressed text (prose or JSON string depending on format). */
   compressed: string;
   /** Original character count. */
   originalChars: number;
@@ -45,6 +79,13 @@ export interface CompressionResult {
   ratio: number;
   /** Which tier performed the compression. */
   tier: CompressionTier;
+  /** Output format: 'json' = grammar-constrained diff-mode, 'prose' = free text. */
+  format?: "json" | "prose";
+  /**
+   * Parsed structured handoff when format is 'json'.
+   * Consumers should prefer this over parsing `compressed` directly.
+   */
+  structured?: StructuredHandoff;
 }
 
 /** Result from an embed() call. */

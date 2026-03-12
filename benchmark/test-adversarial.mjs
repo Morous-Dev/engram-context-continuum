@@ -54,6 +54,22 @@ const MODELS = [
     noThink:                  true,
     ignoreMemorySafetyChecks: true,
   },
+  // ── Claude CLI baselines ───────────────────────────────────────────────────
+  // These run via the `claude` CLI (subscription-based, no API key needed).
+  // Haiku = fast "small Claude" comparison; Sonnet = gold standard ceiling.
+  // Requires: `claude` in PATH and an active Claude subscription.
+  {
+    id:         'claude-haiku-4-5',
+    label:      'Claude Haiku 4.5 (CLI)',
+    type:       'cli',
+    cliModel:   'claude-haiku-4-5-20251001',
+  },
+  {
+    id:         'claude-sonnet-4-6',
+    label:      'Claude Sonnet 4.6 (CLI)',
+    type:       'cli',
+    cliModel:   'claude-sonnet-4-6',
+  },
 ];
 
 // ── Archivist prompt (same as production) ─────────────────────────────────────
@@ -804,6 +820,50 @@ async function runSingleModel(modelId) {
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
+// ── Claude CLI runner ─────────────────────────────────────────────────────────
+
+/**
+ * Run all tests against a Claude CLI model (subscription-based, no API key).
+ *
+ * Uses `claude -p <prompt> --model <model>` — the Claude Code non-interactive
+ * mode that runs a single prompt and returns output. Requires `claude` in PATH
+ * with an active subscription session.
+ *
+ * @param {object} modelDef - CLI model entry from MODELS array.
+ * @returns {Array} Results array parallel to TESTS.
+ */
+async function runCliModel(modelDef) {
+  const results = [];
+  for (const test of TESTS) {
+    const prompt = buildPrompt(test.input);
+    const t0 = Date.now();
+    let output = '';
+    try {
+      // Pass prompt via stdin to avoid shell special-char interpretation
+      // (prompts contain backticks, $vars, > operators from code samples).
+      // shell:true required on Windows to resolve claude.cmd from PATH.
+      // CLAUDECODE env var must be unset: Claude Code blocks nested sessions
+      // by default, but --print mode is non-interactive and safe to run nested.
+      const subEnv = { ...process.env };
+      delete subEnv.CLAUDECODE;
+      const proc = spawnSync(
+        'claude',
+        ['--print', '--model', modelDef.cliModel],
+        { input: prompt, encoding: 'utf8', timeout: 120_000, shell: true, env: subEnv }
+      );
+      if (proc.error) throw proc.error;
+      if (proc.status !== 0) throw new Error(`claude exited ${proc.status}: ${proc.stderr?.slice(0, 200)}`);
+      output = (proc.stdout ?? '').trim();
+    } catch (err) {
+      output = `[CLI error: ${err.message?.slice(0, 120)}]`;
+    }
+    const ms = Date.now() - t0;
+    process.stderr.write(`  ${test.id}: ${ms}ms — ${test.evaluate(output) ? 'PASS' : 'FAIL'}\n`);
+    results.push({ passed: test.evaluate(output), output, ms });
+  }
+  return results;
+}
+
 // ── Main orchestrator ─────────────────────────────────────────────────────────
 
 const modelIdArg = process.argv.indexOf('--model-id');
@@ -817,11 +877,31 @@ console.log('  SLM ADVERSARIAL BENCHMARK — Engram Context Continuum');
 console.log('═'.repeat(72));
 console.log('  10 real-world hostile scenarios — code walls, traces, math,');
 console.log('  multilingual, nothing-resolved, flip-flop errors, domain jargon');
-console.log('  (Each model runs in an isolated subprocess for CUDA VRAM isolation)');
+console.log('  (GGUF models: isolated subprocess per model; Claude: CLI subprocess per test)');
 
 const allResults = [];
 
 for (const m of MODELS) {
+  // ── Claude CLI models ────────────────────────────────────────────────────
+  if (m.type === 'cli') {
+    console.log(`\n${'─'.repeat(72)}`);
+    console.log(`  Testing: ${m.label}`);
+    console.log(`  Mode: Claude CLI (${m.cliModel})`);
+    const results = await runCliModel(m);
+    allResults.push({ model: m, results });
+
+    for (let i = 0; i < TESTS.length; i++) {
+      const t = TESTS[i];
+      const r = results[i];
+      const icon = r.passed ? '✓' : '✗';
+      console.log(`\n  ${icon} ${t.id}: ${t.name} (${r.ms}ms)`);
+      console.log(`    Hint: ${t.hint}`);
+      console.log(`    Output: ${r.output.slice(0, 220).replace(/\n/g, ' ')}${r.output.length > 220 ? '...' : ''}`);
+    }
+    continue;
+  }
+
+  // ── GGUF local models (subprocess isolation for CUDA VRAM) ───────────────
   const modelPath = join(MODELS_DIR, m.file);
   if (!existsSync(modelPath)) {
     console.log(`\n  [SKIP] ${m.label} — model file not found: ${m.file}`);

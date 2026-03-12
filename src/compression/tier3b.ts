@@ -2,10 +2,11 @@
  * tier3b.ts — node-llama-cpp GGUF compressor: Qwen 3.5 2B Q5_K_M.
  *
  * Responsible for: compressing session context using Qwen 3.5 2B via
- * node-llama-cpp. This is the lightweight GGUF tier — selected after quality
- * testing where it scored 3/3 on conflict resolution, error truthfulness,
- * and intent extraction. Smaller than tier3 (1.44 GB vs 2.32 GB) and suitable
- * for machines with limited GPU VRAM.
+ * node-llama-cpp. This is the lightweight GGUF tier — scored 9/10 on
+ * adversarial benchmark. Smaller than tier3 (1.44 GB vs 2.32 GB).
+ *
+ * Output mode: grammar-constrained JSON ("diff-mode"). Falls back to prose
+ * if grammar creation fails. Falls back to Tier1 if model is missing.
  *
  * GPU strategy: tries GPU inference at full 4096 context with
  * ignoreMemorySafetyChecks:true. Qwen 3.5 2B's hybrid DeltaNet/GQA architecture
@@ -16,28 +17,27 @@
  * If the GPU load still genuinely fails, retries with gpu:false for CPU-only
  * inference. CPU is slower (~1-3 min) but always works.
  *
- * Root cause research: node-llama-cpp issue #435, llama.cpp Qwen3.5 arch issues
- * #19879/#19858, and confirmed VRAM reporting quirk on RTX 50-series Blackwell.
+ * Note: Qwen 3.5 2B has a thinking mode (generates <think>...</think> blocks).
+ * The prompt includes /no_think to disable it for fast, direct output.
  *
  * Model file: qwen3.5-2b-q5_k_m.gguf (~1.44 GB)
  * Location:   ~/.engram-cc/models/
  * RAM needed:  ~2.5 GB VRAM (GPU) or ~2 GB RAM (CPU)
  *
- * Note: Qwen 3.5 2B has a thinking mode (generates <think>...</think> blocks).
- * The prompt includes /no_think to disable it for fast, direct summarization.
- *
  * Depends on: node-llama-cpp (optional native npm package),
- *             src/compression/tier1.ts, src/compression/tier2.ts.
+ *             src/compression/tier1.ts, src/compression/tier2.ts,
+ *             src/compression/schema.ts, src/compression/preprocess.ts.
  * Depended on by: src/compression/index.ts.
  */
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { Compressor, CompressionResult, EmbedResult } from "./types.js";
+import type { Compressor, CompressionResult, EmbedResult, StructuredHandoff } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
+import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
 
 // ── Model file ─────────────────────────────────────────────────────────────────
 
@@ -47,26 +47,14 @@ function getModelPath(): string {
   return join(homedir(), ".engram-cc", "models", MODEL_FILE);
 }
 
-// ── Compression prompt ─────────────────────────────────────────────────────────
+// ── Prose fallback prompt ────────────────────────────────────────────────────
 
 /**
- * Build the Archivist prompt for Qwen 3.5 2B.
- *
- * Identical to tier3.ts buildCompressionPrompt, with /no_think prepended to
- * suppress Qwen's chain-of-thought reasoning mode. Without this, Qwen generates
- * a <think>...</think> block that gets stripped by LlamaChatSession, leaving
- * an empty or truncated output.
- *
- * @param text     - Structured session data to synthesize.
- * @param maxRatio - Target compression ratio.
- * @returns Formatted prompt string.
+ * Build prose prompt with /no_think prepended for Qwen 3.5 2B.
  */
-function buildCompressionPrompt(text: string, maxRatio: number): string {
+function buildProsePrompt(text: string, maxRatio: number): string {
   const targetWords = Math.floor(text.split(/\s+/).length / maxRatio);
   return [
-    // /no_think disables Qwen 3.5's chain-of-thought mode — required for direct output.
-    // Without this, Qwen generates a <think>...</think> block that LlamaChatSession strips,
-    // leaving truncated or empty output.
     `/no_think`,
     ``,
     `You are a senior software engineer writing a precise handoff brief for the next engineer.`,
@@ -101,6 +89,7 @@ interface LlamaLoadOpts {
 }
 interface LlamaInstance {
   loadModel(opts: { modelPath: string }): Promise<LlamaModel>;
+  createGrammarForJsonSchema(schema: unknown): Promise<LlamaGrammarInstance>;
   dispose(): Promise<void>;
 }
 interface LlamaModel {
@@ -112,6 +101,9 @@ interface LlamaContext {
   dispose(): Promise<void>;
 }
 interface LlamaSequence { [key: string]: unknown; }
+interface LlamaGrammarInstance {
+  parse(json: string): unknown;
+}
 interface PromptOpts {
   maxTokens?: number;
   temperature?: number;
@@ -119,6 +111,7 @@ interface PromptOpts {
   topP?: number;
   minP?: number;
   repeatPenalty?: number | { penalty: number; lastTokens?: number };
+  grammar?: LlamaGrammarInstance;
 }
 interface LlamaChatSessionInstance {
   prompt(text: string, opts?: PromptOpts): Promise<string>;
@@ -134,13 +127,10 @@ interface NodeLlamaCppModule {
 /**
  * Tier3bCompressor — lightweight GGUF compression via Qwen 3.5 2B.
  *
- * compress(): uses Qwen 3.5 2B to generate a concise handoff summary.
+ * compress(): uses grammar-constrained JSON (diff-mode) when available.
+ *             Falls back to prose, then to Tier1.
  *             Tries GPU first; falls back to CPU if VRAM is insufficient.
- *             Falls back to Tier1 if the model file is missing.
  * embed():    delegates to Tier2Compressor (MiniLM-L6-v2 sentence embeddings).
- *
- * The model is loaded lazily on first compress() call and cached for the
- * lifetime of the compressor.
  */
 export class Tier3bCompressor implements Compressor {
   readonly tier = "tier3b" as const;
@@ -153,6 +143,7 @@ export class Tier3bCompressor implements Compressor {
   private llama: LlamaInstance | null = null;
   private model: LlamaModel | null = null;
   private ctx: LlamaContext | null = null;
+  private grammar: LlamaGrammarInstance | null = null;
 
   constructor() {
     this.modelPath = getModelPath();
@@ -164,7 +155,7 @@ export class Tier3bCompressor implements Compressor {
   }
 
   /**
-   * Lazily load the Qwen 3.5 2B model via node-llama-cpp.
+   * Lazily load the Qwen 3.5 2B model and create the JSON grammar.
    *
    * GPU strategy: uses ignoreMemorySafetyChecks:true to bypass the VRAM
    * estimator, which over-estimates KV cache for Qwen 3.5's hybrid
@@ -179,20 +170,16 @@ export class Tier3bCompressor implements Compressor {
           const llamaCpp = await import("node-llama-cpp") as unknown as NodeLlamaCppModule;
 
           // Attempt 1: GPU at full context, bypassing the VRAM estimator.
-          // The estimator wrongly rejects Qwen 3.5 2B at ≥1024 ctx on RTX 5060 Ti
-          // (Blackwell SM_120) due to its hybrid DeltaNet architecture not being
-          // accounted for. Actual GPU usage is ~2.5 GB — well within 16 GB VRAM.
           try {
             this.llama = await llamaCpp.getLlama();
             this.model = await this.llama.loadModel({ modelPath: this.modelPath });
             this.ctx   = await this.model.createContext({ contextSize: 4096, ignoreMemorySafetyChecks: true });
-            return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx.getSequence() });
           } catch (gpuErr) {
             const msg = String(gpuErr instanceof Error ? gpuErr.message : gpuErr).toLowerCase();
             const isVramError = msg.includes("vram") || msg.includes("too large") || msg.includes("out of memory");
-            if (!isVramError) throw gpuErr; // Not a VRAM issue — propagate
+            if (!isVramError) throw gpuErr;
 
-            // Attempt 2: CPU-only inference (slower but works with any GPU/RAM config)
+            // Attempt 2: CPU-only inference
             console.error(`[EngramCC:tier3b] GPU allocation failed, falling back to CPU inference`);
             try { await this.ctx?.dispose(); } catch { /* ignore */ }
             try { await this.model?.dispose(); } catch { /* ignore */ }
@@ -202,8 +189,16 @@ export class Tier3bCompressor implements Compressor {
             this.llama = await llamaCpp.getLlama({ gpu: false });
             this.model = await this.llama.loadModel({ modelPath: this.modelPath });
             this.ctx   = await this.model.createContext({ contextSize: 4096 });
-            return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx.getSequence() });
           }
+
+          // Create grammar for structured JSON output. Non-fatal if unsupported.
+          try {
+            this.grammar = await this.llama!.createGrammarForJsonSchema(HANDOFF_SCHEMA);
+          } catch {
+            console.error("[EngramCC:tier3b] grammar creation failed, falling back to prose mode");
+          }
+
+          return new llamaCpp.LlamaChatSession({ contextSequence: this.ctx!.getSequence() });
         } catch {
           this._available = false;
           return null;
@@ -214,7 +209,8 @@ export class Tier3bCompressor implements Compressor {
   }
 
   /**
-   * Compress text using Qwen 3.5 2B. Falls back to Tier 1 if unavailable.
+   * Compress text using Qwen 3.5 2B. Tries diff-mode (JSON) first,
+   * falls back to prose, falls back to Tier1 if unavailable.
    *
    * @param text     - Text to compress.
    * @param maxRatio - Target compression ratio (default 3.0).
@@ -225,12 +221,48 @@ export class Tier3bCompressor implements Compressor {
 
     try {
       const cleaned = preprocessSessionData(text);
-      const prompt = buildCompressionPrompt(cleaned, maxRatio);
       const targetTokens = Math.ceil(cleaned.split(/\s+/).length / maxRatio * 1.5);
-      const maxTokens = Math.max(150, Math.min(targetTokens, 500));
+      // JSON is ~50% more token-heavy than prose; grammar mode gets a higher cap.
+      const maxTokens = this.grammar
+        ? Math.max(300, Math.min(targetTokens, 800))
+        : Math.max(200, Math.min(targetTokens, 600));
+
+      // ── Diff-mode: grammar-constrained JSON output ────────────────────────
+      if (this.grammar) {
+        try {
+          // /no_think prepended for Qwen's thinking mode suppression
+          const prompt = `/no_think\n\n${buildDiffModePrompt(cleaned)}`;
+          const raw = await session.prompt(prompt, {
+            maxTokens,
+            temperature: 0.1,
+            topK: 1,
+            repeatPenalty: 1.05,
+            grammar: this.grammar,
+          });
+
+          const parsed = this.grammar.parse(raw) as StructuredHandoff;
+          if (parsed && parsed.current_task) {
+            const compressed = JSON.stringify(parsed);
+            return {
+              compressed,
+              originalChars: text.length,
+              compressedChars: compressed.length,
+              ratio: text.length / Math.max(compressed.length, 1),
+              tier: this.tier,
+              format: "json",
+              structured: parsed,
+            };
+          }
+        } catch {
+          console.error("[EngramCC:tier3b] diff-mode failed, falling back to prose");
+        }
+      }
+
+      // ── Prose fallback ────────────────────────────────────────────────────
+      const prompt = buildProsePrompt(cleaned, maxRatio);
       const summary = await session.prompt(prompt, {
         maxTokens,
-        temperature: 0.1,     // near-greedy — maximizes faithfulness while allowing richer outputs than temperature=0
+        temperature: 0.1,
         topK: 1,
         repeatPenalty: 1.05,
       });
@@ -244,6 +276,7 @@ export class Tier3bCompressor implements Compressor {
         compressedChars: compressed.length,
         ratio: text.length / Math.max(compressed.length, 1),
         tier: this.tier,
+        format: "prose",
       };
     } catch {
       return this.fallback.compress(text, maxRatio);

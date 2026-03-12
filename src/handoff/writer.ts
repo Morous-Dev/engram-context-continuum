@@ -208,7 +208,7 @@ export async function buildHandoffFromEvents(
   ];
 
   // decisions: unique decision event data, truncated
-  const decisions = [
+  let decisions = [
     ...new Set(decisionEvents.map(e => truncateString(e.data, 200))),
   ].slice(-15);
 
@@ -236,7 +236,7 @@ export async function buildHandoffFromEvents(
 
   // current_task: last user prompt or transcript's last user message
   const lastPromptEvent = promptEvents.at(-1);
-  const currentTask = lastPromptEvent
+  let currentTask = lastPromptEvent
     ? truncateString(lastPromptEvent.data, 300)
     : (transcript?.user_messages.at(-1) ? truncateString(transcript.user_messages.at(-1)!, 300) : "");
 
@@ -249,7 +249,7 @@ export async function buildHandoffFromEvents(
   const openQuestions = questionEvents.map(e => truncateString(e.data, 200)).slice(-5);
 
   // blockers: unresolved errors
-  const blockers = allErrors.length > 0 ? allErrors.slice(-3) : [];
+  let blockers = allErrors.length > 0 ? allErrors.slice(-3) : [];
 
   // confidence: high if we have events + transcript, medium if only one, low if neither
   const hasEvents = events.length > 0;
@@ -272,6 +272,8 @@ export async function buildHandoffFromEvents(
 
   // Use local SLM to synthesize working_context and headline if available.
   // Zero external API calls — only the locally-hosted GGUF model is used.
+  // When the SLM supports diff-mode (grammar-constrained JSON), the structured
+  // output also enriches decisions, errors, and blockers with SLM analysis.
   if (compressor) {
     const synthesisInput = buildSynthesisInput(
       promptEvents, decisionEvents, filesModified, allErrors,
@@ -280,9 +282,52 @@ export async function buildHandoffFromEvents(
     if (synthesisInput.trim()) {
       try {
         const result = await compressor.compress(synthesisInput, 3.0);
-        if (result.compressed.trim()) {
+
+        if (result.format === "json" && result.structured) {
+          // ── Diff-mode: structured JSON from grammar-constrained SLM ──────
+          const s = result.structured;
+
+          // SLM-identified current task overrides heuristic (it resolves conflicts)
+          if (s.current_task) currentTask = s.current_task;
+
+          // Synthesis becomes the working context
+          if (s.synthesis) workingContext = s.synthesis;
+
+          // Headline from synthesis first sentence
+          if (s.synthesis) {
+            const firstSentence = s.synthesis.split(/(?<=[.!?])\s/)[0] ?? s.synthesis;
+            headline = truncateString(firstSentence.trim(), 150);
+          }
+
+          // Enrich decisions with SLM analysis (prepend status for clarity)
+          if (s.decisions?.length) {
+            const slmDecisions = s.decisions.map(d =>
+              `[${d.status}] ${d.topic}: ${d.decision}`
+            );
+            // Merge: SLM decisions first (they resolved conflicts), then rule-based
+            decisions = [...slmDecisions, ...decisions.filter(d =>
+              !slmDecisions.some(sd => sd.toLowerCase().includes(d.slice(0, 40).toLowerCase()))
+            )].slice(0, 15);
+          }
+
+          // Enrich blockers with SLM error analysis
+          if (s.errors?.length) {
+            const unresolvedFromSLM = s.errors
+              .filter(e => e.status !== "RESOLVED")
+              .map(e => `[${e.status}] ${e.description}`);
+            if (unresolvedFromSLM.length > 0) {
+              blockers = unresolvedFromSLM;
+            }
+          }
+
+          // Next session becomes the next_steps if empty
+          if (s.next_session && nextSteps.length === 0) {
+            nextSteps.push(s.next_session);
+          }
+
+        } else if (result.compressed.trim()) {
+          // ── Prose fallback ───────────────────────────────────────────────
           workingContext = result.compressed.trim();
-          // Extract just the first sentence for the headline to keep it concise.
           const firstSentence = result.compressed.split(/(?<=[.!?])\s/)[0] ?? result.compressed;
           headline = truncateString(firstSentence.trim(), 150);
         }
