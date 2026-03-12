@@ -13,7 +13,7 @@ dense and non-redundant.
 Stop hook
   → dedup.ts:extractTranscriptContext()   ← parse session JSONL, dedup user msgs
   → writer.ts:buildHandoffFromEvents()    ← synthesize 15-section HandoffData
-  → writer.ts:writeHandoff()              ← write YAML to ~/.claude/super-context/handoff/
+  → writer.ts:writeHandoff()              ← write YAML to [projectDir]/.engram-cc/handoff.yaml
 
 SessionStart hook (startup branch only — not compact/resume)
   → reader.ts:readHandoff()               ← load YAML, reject if > 15 min old
@@ -32,7 +32,7 @@ SessionStart hook (startup branch only — not compact/resume)
 ## Handoff file location
 
 ```
-~/.claude/super-context/handoff/<sha256(projectDir)[:16]>.yaml
+[projectDir]/.engram-cc/handoff.yaml
 ```
 
 ## Patterns to follow

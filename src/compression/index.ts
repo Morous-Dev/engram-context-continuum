@@ -41,6 +41,10 @@ const DEFAULT_CONFIG: CompressionConfig = {
   },
 };
 
+const VALID_TIERS = new Set<CompressionTier | "auto">([
+  "tier1", "tier2", "tier3", "tier3b", "tier3c", "tier4", "auto",
+]);
+
 /**
  * Read the compression section from plugin-config.yaml.
  * Returns DEFAULT_CONFIG on any parse failure.
@@ -58,8 +62,19 @@ function readCompressionConfig(): CompressionConfig {
     const comp = raw?.["compression"] as Partial<CompressionConfig> | undefined;
     if (!comp) return DEFAULT_CONFIG;
 
+    const configTier = typeof comp.tier === "string" ? comp.tier : undefined;
+    let tier: CompressionTier | "auto" = "auto";
+
+    if (configTier) {
+      if (VALID_TIERS.has(configTier as CompressionTier | "auto")) {
+        tier = configTier as CompressionTier | "auto";
+      } else {
+        console.error(`[EngramCC] Unknown compression tier "${configTier}" in config. Falling back to "auto".`);
+      }
+    }
+
     return {
-      tier: (comp.tier as CompressionTier | "auto") ?? "auto",
+      tier,
       external: {
         provider: comp.external?.provider ?? DEFAULT_CONFIG.external.provider,
         model: comp.external?.model ?? DEFAULT_CONFIG.external.model,

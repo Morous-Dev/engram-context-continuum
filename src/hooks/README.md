@@ -86,5 +86,5 @@ on CPU) so there is no contention.
 
 | Log file | Written by | Contains |
 |----------|-----------|---------|
-| `~/.claude/super-context/precompact-debug.log` | precompact.mjs | SLM brief results, engram retrieval stats, hardware profile, errors |
+| `~/.engram-cc/logs/precompact-debug.log` | precompact.mjs | SLM brief results, engram retrieval stats, hardware profile, errors |
 | `~/.engram-cc/sessionstart-debug.log` | sessionstart.mjs | Session start errors |

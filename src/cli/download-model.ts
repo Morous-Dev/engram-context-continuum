@@ -1,10 +1,10 @@
 /**
- * download-model.ts — GGUF model downloader for super-context-plugin.
+ * download-model.ts — GGUF model downloader for EngramCC.
  *
  * What this file is: downloads the correct GGUF model for the user's machine tier.
  * Responsible for: trying hf CLI first (handles resume + auth), falling back to
  *   Node.js fetch, showing progress, and renaming files to the exact names that
- *   tier3.ts expects in ~/.claude/super-context/models/.
+ *   tier3.ts expects in ~/.engram-cc/models/.
  * Depends on: node:fs, node:path, node:os, node:child_process, node:stream,
  *   src/compression/types.ts.
  * Depended on by: src/cli/setup.ts.
@@ -84,7 +84,7 @@ function localPath(localFile: string): string {
 /**
  * Check whether the model file for a given tier already exists on disk.
  *
- * @param tier - The compression tier to check (tier3a / tier3b / tier3c).
+ * @param tier - The compression tier to check (tier3 / tier3b / tier3c).
  * @returns true if the model file is present and non-empty.
  */
 export function isModelDownloaded(tier: string): boolean {

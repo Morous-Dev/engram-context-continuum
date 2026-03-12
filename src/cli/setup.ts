@@ -13,7 +13,7 @@
  * Flags:
  *   --yes           skip all prompts, accept defaults
  *   --no-model      skip GGUF download (hooks + dirs still registered)
- *   --tier=<id>     force a specific tier (tier1|tier2|tier3a|tier3b|tier3c|tier4)
+ *   --tier=<id>     force a specific tier (tier1|tier2|tier3|tier3b|tier3c|tier4)
  */
 
 import { totalmem } from "node:os";
@@ -131,7 +131,7 @@ function selectTier(hw: HardwareInfo): TierInfo {
 // ── Directories ──────────────────────────────────────────────────────────────
 
 /**
- * Create the required data directories under ~/.claude/super-context/.
+ * Create the required data directories under ~/.engram-cc/.
  * Each subdirectory has a specific purpose:
  *   sessions/ — per-project SQLite databases
  *   handoff/  — session handoff YAML files

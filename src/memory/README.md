@@ -37,7 +37,7 @@ graph_edges  -- from_node FK, to_node FK, relation, properties JSON
 vec_procedures -- sqlite-vec virtual table: embedding float[384], id, content, metadata
 ```
 
-Working memory lives at `~/.claude/super-context/working/<hash>.yaml` — outside
+Working memory lives at `[projectDir]/.engram-cc/working.yaml` — outside
 the DB so users can inspect and edit it.
 
 ## Patterns to follow
