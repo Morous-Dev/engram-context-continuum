@@ -436,8 +436,8 @@ server.tool(
         return { content: [{ type: "text", text: "Knowledge graph not yet built for this project." }] };
       }
 
-      interface NodeRow { id: number; type: string; label: string; }
-      interface EdgeRow { from_node: number; to_node: number; relation: string; }
+      interface NodeRow { id: string; type: string; label: string; }
+      interface EdgeRow { from_node: string; to_node: string; relation: string; }
 
       // Find seed node
       const seed = db.prepare<[string, string], NodeRow>(
@@ -449,21 +449,26 @@ server.tool(
       }
 
       // BFS traversal
-      const visited = new Set<number>([seed.id]);
-      const queue: Array<{ id: number; depth: number }> = [{ id: seed.id, depth: 0 }];
+      const visited = new Set<string>([seed.id]);
+      const queue: Array<{ id: string; depth: number }> = [{ id: seed.id, depth: 0 }];
       const results: string[] = [`# Knowledge graph — "${label}"\n`, `**Seed:** [${seed.type}] ${seed.label}\n`];
 
       while (queue.length > 0) {
         const current = queue.shift()!;
         if (current.depth >= depth) continue;
 
-        const edges = db.prepare<[number, number, string], EdgeRow & { neighbor_label: string; neighbor_type: string }>(
+        const edges = db.prepare<[string, string, string, string], EdgeRow & { neighbor_label: string; neighbor_type: string }>(
           `SELECT e.from_node, e.to_node, e.relation, n.label as neighbor_label, n.type as neighbor_type
            FROM graph_edges e
-           JOIN graph_nodes n ON (e.to_node = n.id OR e.from_node = n.id)
-           WHERE (e.from_node = ? OR e.to_node = ?) AND e.project_dir = ?
+           JOIN graph_nodes n ON e.to_node = n.id
+           WHERE e.from_node = ? AND e.project_dir = ?
+           UNION ALL
+           SELECT e.from_node, e.to_node, e.relation, n.label as neighbor_label, n.type as neighbor_type
+           FROM graph_edges e
+           JOIN graph_nodes n ON e.from_node = n.id
+           WHERE e.to_node = ? AND e.project_dir = ?
            LIMIT 20`,
-        ).all(current.id, current.id, dir);
+        ).all(current.id, dir, current.id, dir);
 
         for (const edge of edges) {
           const neighborId = edge.from_node === current.id ? edge.to_node : edge.from_node;
