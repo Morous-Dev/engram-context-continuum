@@ -81,7 +81,7 @@ When facts conflict, use:
 - `src/hooks/stop.ts` — Stop hook: compressor + handoff + graph + vector pipeline
 - `src/hooks/sessionstart.mjs` — SessionStart: tiered context injection
 - `src/hooks/posttooluse.mjs` — PostToolUse: event capture
-- `src/hooks/precompact.mjs` — PreCompact: SLM compression snapshot
+- `src/hooks/precompact.mjs` — PreCompact: 3-layer compaction recovery (XML snapshot + SLM brief + engram retrieval); parallel on power hardware
 - `src/hooks/userpromptsubmit.mjs` — UserPromptSubmit: intent capture
 - `src/hooks/session-helpers.mjs` — Shared path/ID utilities (uses getProjectId)
 

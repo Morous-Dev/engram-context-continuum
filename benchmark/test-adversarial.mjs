@@ -21,10 +21,12 @@
  *   A8 — Domain jargon:     finance/options trading session; must not hallucinate domain facts
  *   A9 — Competing tasks:   many tasks, current task is buried at the very end
  *   A10 — Long article + work: 800-word article paste + small actual work; work must win
+ *   A11 — Multi-compaction chain: signals distributed across 3 compaction cycles;
+ *          model must synthesize from the full arc, not just the tail
  *
- * Architecture: same subprocess-per-model isolation as test-models.mjs.
+ * Architecture: subprocess-per-model isolation for CUDA VRAM safety.
  *
- * Run via: node benchmark/test-adversarial.mjs
+ * Run via: node benchmark/test-adversarial.mjs [--model <filter>]
  * Depends on: node-llama-cpp
  */
 
@@ -54,21 +56,36 @@ const MODELS = [
     noThink:                  true,
     ignoreMemorySafetyChecks: true,
   },
-  // ── Claude CLI baselines ───────────────────────────────────────────────────
-  // These run via the `claude` CLI (subscription-based, no API key needed).
-  // Haiku = fast "small Claude" comparison; Sonnet = gold standard ceiling.
-  // Requires: `claude` in PATH and an active Claude subscription.
+  // ── Gemma 3 4B QAT — high-quality candidate ───────────────────────────────
+  // IFEval 90.2% — highest of any sub-5B model. QAT Q4_0 preserves near-
+  // bfloat16 quality at 2.37 GB. No thinking mode to suppress.
   {
-    id:         'claude-haiku-4-5',
-    label:      'Claude Haiku 4.5 (CLI)',
-    type:       'cli',
-    cliModel:   'claude-haiku-4-5-20251001',
+    id:                       'gemma3-4b',
+    label:                    'Gemma 3 4B QAT  (cand)',
+    file:                     'gemma-3-4b-it-qat-q4_0.gguf',
+    noThink:                  false,
+    ignoreMemorySafetyChecks: false,
   },
+  // ── Qwen3.5-4B Q4_K_M — tier3b upgrade candidate ─────────────────────────
+  // Tests whether 4B Qwen fixes the A10 failure seen in 2B (pasted article
+  // dominates over actual work done). Q4_K_M = 2.74 GB. Has thinking mode.
   {
-    id:         'claude-sonnet-4-6',
-    label:      'Claude Sonnet 4.6 (CLI)',
-    type:       'cli',
-    cliModel:   'claude-sonnet-4-6',
+    id:                       'qwen3.5-4b',
+    label:                    'Qwen3.5 4B Q4_K_M (cand)',
+    file:                     'Qwen3.5-4B-Q4_K_M.gguf',
+    noThink:                  true,
+    ignoreMemorySafetyChecks: true,
+  },
+  // ── Gemma 3 1B QAT — sub-2GB lightweight candidate ────────────────────────
+  // Same QAT training that gave Gemma 4B a 10/10. At ~720 MB this is the
+  // most capable sub-1GB model available. IFEval ceiling is lower at 1B
+  // (~35% vs 90% for 4B) — testing to find the actual adversarial floor.
+  {
+    id:                       'gemma3-1b',
+    label:                    'Gemma 3 1B QAT Q4_0  (sub-2GB)',
+    file:                     'google_gemma-3-1b-it-qat-Q4_0.gguf',
+    noThink:                  false,
+    ignoreMemorySafetyChecks: false,
   },
 ];
 
@@ -518,11 +535,24 @@ Timeline of events this session:
       // IMPORTANT: use \b word boundaries so "unresolved" does NOT match (resolved).
       // Without \b, "race condition...unresolved" falsely triggers the pattern because
       // "unresolved" contains "resolved" as a substring.
-      const claimsResolved =
+      //
+      // False-positive guard: a model that says "appeared resolved...however the race
+      // condition recurred" is correctly reporting history — the "resolved" is past-tense
+      // context, not a final claim. Only flag claimsResolved when the model ALSO fails to
+      // mention recurrence or failure, i.e. it presents resolution as the current state.
+      const appearsToClaimResolved =
         /race\s*condition.{0,60}\b(resolved|fixed|solved)\b/i.test(output) ||
         /\b(resolved|fixed|solved)\b.{0,60}race\s*condition/i.test(output) ||
         /mutex.{0,40}\b(resolved|fixed|solved|worked)\b/i.test(output) ||
         /\bsuccessfully\s+(fixed|resolved)\b/i.test(output);
+      const acknowledgesRecurrence =
+        lower.includes('recurred') ||
+        lower.includes('recur') ||
+        lower.includes('still unresolved') ||
+        lower.includes('still open') ||
+        (lower.includes('failed') && (lower.includes('load') || lower.includes('50')));
+      // True hallucination = claims resolved AND shows no awareness of recurrence
+      const claimsResolved = appearsToClaimResolved && !acknowledgesRecurrence;
       // Must mention it's still open / what comes next
       const mentionsOpen =
         lower.includes('still') ||
@@ -623,10 +653,13 @@ Session log — long day with many tasks:
         lower.includes('incomplete') ||
         lower.includes('rotation') ||
         (lower.includes('not') && lower.includes('complet'));
-      // Should NOT only describe the earlier (completed) tasks as "current"
+      // Should NOT describe the earlier (completed) tasks as "current" or what to do "next".
+      // IMPORTANT: check proximity — a model may correctly say "monorepo is complete" AND
+      // "JWT is the current task" in separate sentences. Only flag if the wrong task appears
+      // in the SAME clause as "current" or "next session", indicating it's mis-identified.
       const wrongCurrentTask =
-        (lower.includes('current') || lower.includes('next')) &&
-        (lower.includes('turborepo') || lower.includes('monorepo') || lower.includes('fastify migration') || lower.includes('openapi'));
+        /(?:current\s+task|currently\s+working|next\s+session\s+should)[^.!?\n]{0,80}(?:turborepo|monorepo|fastify|openapi)/i.test(output) ||
+        /(?:turborepo|monorepo|fastify|openapi)[^.!?\n]{0,80}(?:is\s+the\s+current|current\s+task|next\s+session)/i.test(output);
       return mentionsCurrentTask && mentionsOpen && !wrongCurrentTask;
     },
     hint: 'Must identify JWT refresh token rotation (with 500 error) as the current task',
@@ -709,6 +742,81 @@ Actual work done this session:
       return mentionsWork && mentionsResult && mentionsOpen && !summarizedArticle;
     },
     hint: 'Must summarize the GIN index + GraphQL search work; not the pasted FTS article',
+  },
+
+  // ── A11: Multi-compaction chain ─────────────────────────────────────────────
+  // Simulates the input shape produced by buildSynthesisInput() after the chain
+  // fix: prior compaction briefs prepended before the tail events.
+  // Signal facts are distributed across all 3 cycles — the model must synthesize
+  // from the full arc to pass all 4 evaluators.
+  //
+  // Cycle 1 signal: REST→GraphQL migration, Tailwind CSS as final CSS choice
+  // Cycle 2 signal: WebSocket/headers error introduced — still unresolved
+  // Cycle 3 signal (tail): auth middleware is the current task; same error open
+  {
+    id: 'A11',
+    name: 'Multi-compaction chain — must synthesize from full session arc',
+    input: `
+Session history from prior compaction cycles:
+[Cycle 1] The team migrated from a REST API to GraphQL. Set up Apollo Server v4 with Express adapter and defined User, Product, and Order schema types. Key architectural decision: switched CSS framework from Bootstrap to Tailwind CSS (final choice — Bootstrap removed, Tailwind configured project-wide). All REST endpoints remain active in parallel during the migration. 4 files modified. No open errors at end of cycle 1.
+
+[Cycle 2] Auth middleware work began. GraphQL context was extended with currentUser via a new extractToken function in src/graphql/middleware/auth.ts. Error encountered: Cannot read properties of undefined reading 'headers' at extractToken (src/graphql/middleware/auth.ts:12) — occurs on WebSocket connections where the HTTP headers object is absent. Attempted fix: added connectionParams check — error persists after the edit. Status at end of cycle 2: STILL FAILING — headers crash unresolved on WebSocket connections.
+
+--- Current session tail (most recent events) ---
+Current task: Debugging authentication middleware — WebSocket headers crash in extractToken
+Last action: Edited src/graphql/middleware/auth.ts — trying split auth strategy
+
+User requests (chronological):
+- Fix the auth middleware headers crash on WebSocket connections
+- Try reading from connectionParams.Authorization for WebSocket, headers for HTTP
+
+Decisions made:
+- Use connectionParams for WebSocket auth, HTTP headers for standard requests (split approach)
+- Keep Apollo Server v4 (confirmed, not switching to Yoga)
+
+Files modified (2 total):
+- src/graphql/middleware/auth.ts
+- src/graphql/context.ts
+
+Unresolved errors:
+- Cannot read properties of undefined reading 'headers' at extractToken (auth.ts:12)
+  Attempted fix: connectionParams split — error still occurs on some WebSocket connections
+  Status: STILL FAILING — next session must continue debugging this
+`.trim(),
+    evaluate(output) {
+      const lower = output.toLowerCase();
+
+      // E1: GraphQL/Apollo migration from cycle 1 must be mentioned.
+      // This is the cross-cycle signal — proves the model synthesized from cycle 1.
+      // Bare 'rest' omitted — too broad (matches "the rest of", "interest", etc.).
+      const mentionsCycle1Decision =
+        lower.includes('graphql') ||
+        lower.includes('apollo') ||
+        lower.includes('migration') ||
+        lower.includes('rest api') ||
+        lower.includes('rest endpoint');
+
+      // E2: Must NOT claim the WebSocket/headers error was fixed.
+      // Same evaluator as T2/Q2 — critical faithfulness check.
+      const claimsFixed =
+        /\berror\s+(was\s+)?(now\s+)?(fixed|resolved|solved|corrected)\b/i.test(output) ||
+        /\bfixed\s+(the\s+)?(websocket|header|auth)\b/i.test(output) ||
+        /\bresolved\s+(the\s+)?(websocket|header|auth)\b/i.test(output) ||
+        /\b(websocket|headers?)\s+(is|are|now)\s+(working|resolved|fixed)\b/i.test(output) ||
+        /\bsuccessfully\s+(fixed|resolved|patched)\b/i.test(output);
+
+      // E3: Must identify auth/middleware as the current task.
+      // Same evaluator as T3/Q3.
+      const mentionsCurrentTask =
+        lower.includes('auth') || lower.includes('middleware');
+
+      // E4: Tailwind from cycle 1 must survive to the brief.
+      // Proves the model carried the CSS decision across the cycle boundary.
+      const mentionsTailwind = lower.includes('tailwind');
+
+      return mentionsCycle1Decision && !claimsFixed && mentionsCurrentTask && mentionsTailwind;
+    },
+    hint: 'Must mention GraphQL migration (cycle 1), Tailwind (cycle 1), auth middleware (cycle 3), and NOT claim the headers error was fixed',
   },
 
 ];
@@ -820,50 +928,6 @@ async function runSingleModel(modelId) {
   process.stdout.write(JSON.stringify(results) + '\n');
 }
 
-// ── Claude CLI runner ─────────────────────────────────────────────────────────
-
-/**
- * Run all tests against a Claude CLI model (subscription-based, no API key).
- *
- * Uses `claude -p <prompt> --model <model>` — the Claude Code non-interactive
- * mode that runs a single prompt and returns output. Requires `claude` in PATH
- * with an active subscription session.
- *
- * @param {object} modelDef - CLI model entry from MODELS array.
- * @returns {Array} Results array parallel to TESTS.
- */
-async function runCliModel(modelDef) {
-  const results = [];
-  for (const test of TESTS) {
-    const prompt = buildPrompt(test.input);
-    const t0 = Date.now();
-    let output = '';
-    try {
-      // Pass prompt via stdin to avoid shell special-char interpretation
-      // (prompts contain backticks, $vars, > operators from code samples).
-      // shell:true required on Windows to resolve claude.cmd from PATH.
-      // CLAUDECODE env var must be unset: Claude Code blocks nested sessions
-      // by default, but --print mode is non-interactive and safe to run nested.
-      const subEnv = { ...process.env };
-      delete subEnv.CLAUDECODE;
-      const proc = spawnSync(
-        'claude',
-        ['--print', '--model', modelDef.cliModel],
-        { input: prompt, encoding: 'utf8', timeout: 120_000, shell: true, env: subEnv }
-      );
-      if (proc.error) throw proc.error;
-      if (proc.status !== 0) throw new Error(`claude exited ${proc.status}: ${proc.stderr?.slice(0, 200)}`);
-      output = (proc.stdout ?? '').trim();
-    } catch (err) {
-      output = `[CLI error: ${err.message?.slice(0, 120)}]`;
-    }
-    const ms = Date.now() - t0;
-    process.stderr.write(`  ${test.id}: ${ms}ms — ${test.evaluate(output) ? 'PASS' : 'FAIL'}\n`);
-    results.push({ passed: test.evaluate(output), output, ms });
-  }
-  return results;
-}
-
 // ── Main orchestrator ─────────────────────────────────────────────────────────
 
 const modelIdArg = process.argv.indexOf('--model-id');
@@ -872,34 +936,24 @@ if (modelIdArg !== -1) {
   process.exit(0);
 }
 
+// --model <filter>: run only models whose id includes the filter string.
+// e.g. --model gemma, --model llama, --model qwen
+const modelFilterArg = process.argv.indexOf('--model');
+const modelFilter = modelFilterArg !== -1 ? process.argv[modelFilterArg + 1] : null;
+
 console.log('\n' + '═'.repeat(72));
 console.log('  SLM ADVERSARIAL BENCHMARK — Engram Context Continuum');
 console.log('═'.repeat(72));
-console.log('  10 real-world hostile scenarios — code walls, traces, math,');
-console.log('  multilingual, nothing-resolved, flip-flop errors, domain jargon');
-console.log('  (GGUF models: isolated subprocess per model; Claude: CLI subprocess per test)');
+console.log('  11 real-world hostile scenarios — code walls, traces, math,');
+console.log('  multilingual, nothing-resolved, flip-flop errors, domain jargon,');
+console.log('  multi-compaction chain (A11)');
+if (modelFilter) console.log(`  Filter: --model ${modelFilter}`);
 
 const allResults = [];
 
 for (const m of MODELS) {
-  // ── Claude CLI models ────────────────────────────────────────────────────
-  if (m.type === 'cli') {
-    console.log(`\n${'─'.repeat(72)}`);
-    console.log(`  Testing: ${m.label}`);
-    console.log(`  Mode: Claude CLI (${m.cliModel})`);
-    const results = await runCliModel(m);
-    allResults.push({ model: m, results });
-
-    for (let i = 0; i < TESTS.length; i++) {
-      const t = TESTS[i];
-      const r = results[i];
-      const icon = r.passed ? '✓' : '✗';
-      console.log(`\n  ${icon} ${t.id}: ${t.name} (${r.ms}ms)`);
-      console.log(`    Hint: ${t.hint}`);
-      console.log(`    Output: ${r.output.slice(0, 220).replace(/\n/g, ' ')}${r.output.length > 220 ? '...' : ''}`);
-    }
-    continue;
-  }
+  // Apply --model filter
+  if (modelFilter && !m.id.includes(modelFilter)) continue;
 
   // ── GGUF local models (subprocess isolation for CUDA VRAM) ───────────────
   const modelPath = join(MODELS_DIR, m.file);
@@ -966,6 +1020,6 @@ for (const { model, results } of allResults) {
 console.log('');
 console.log('  Tests: A1=CodeWall A2=StackTrace A3=PastedArticle A4=Math');
 console.log('         A5=Multilingual A6=NothingResolved A7=ErrorFlipFlop');
-console.log('         A8=DomainJargon A9=BuriedTask A10=ArticleNoise');
+console.log('         A8=DomainJargon A9=BuriedTask A10=ArticleNoise A11=MultiCompactionChain');
 console.log('═'.repeat(72));
 console.log('');

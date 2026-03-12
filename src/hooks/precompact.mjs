@@ -3,16 +3,28 @@ import "./suppress-stderr.mjs";
 /**
  * precompact.mjs — PreCompact hook for super-context session continuity.
  *
- * Responsible for: building a priority-sorted XML resume snapshot (<2KB) from
- * all captured session events, and storing it in the DB for injection after
- * compaction fires. Also triggers the ghost token auditor to prune stale events.
+ * Responsible for: 3-layer compaction recovery pipeline:
+ *   1. XML snapshot  — priority-sorted structural resume (<2KB) from all session events.
+ *   2. SLM brief     — dense semantic summary via local GGUF model (chain-aware from cycle 2+).
+ *   3. Engram retrieval — vector/FTS5/graph queries that surface high-fidelity original
+ *                         facts (decisions, errors, anchor nodes) bypassing the compression chain.
+ *
+ * On power hardware (VRAM ≥ 12 GB): SLM brief (GPU) and engram retrieval (CPU/MiniLM) run
+ * in parallel — cuts PreCompact latency to the longer of the two tasks, not their sum.
+ * On standard/minimal hardware: sequential execution to avoid resource contention.
+ *
+ * All three outputs are stored in session_resume (overwrite) for sessionstart.mjs injection
+ * after compaction. The SLM brief is also appended to session_resume_history (append) so
+ * the stop hook can synthesize a full-arc handoff across all compaction cycles.
  *
  * Triggered when Claude Code is about to compact the conversation (at ~80% of
  * the context window by default per plugin-config.yaml).
  *
  * Depends on: suppress-stderr.mjs, session-helpers.mjs,
  *             build/session/snapshot.js, build/session/db.js,
- *             build/tokenization/auditor.js (compiled TypeScript).
+ *             build/tokenization/auditor.js, build/compression/index.js,
+ *             build/session/compact-brief.js, build/session/engram-retrieval.js,
+ *             build/memory/vector.js, build/memory/graph.js (compiled TypeScript).
  * Depended on by: Claude Code PreCompact hook system.
  */
 
