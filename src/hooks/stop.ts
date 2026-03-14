@@ -3,7 +3,7 @@
  */
 
 import { runStopPipeline } from "../session/ingest.js";
-import { getProjectId } from "../project-id.js";
+import { getProjectId, getRuntimeProjectDir } from "../project-id.js";
 
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
     input = {};
   }
 
-  const projectDir = input.cwd ?? process.env["CLAUDE_PROJECT_DIR"] ?? process.cwd();
+  const projectDir = input.cwd?.trim() || getRuntimeProjectDir();
   const assistant = process.env.ENGRAM_ASSISTANT ?? "unknown";
   let sessionId = input.session_id ?? input.sessionId ?? "";
 

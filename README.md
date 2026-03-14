@@ -33,9 +33,12 @@ The setup CLI detects your hardware, prepares a project-local `.engram-cc/` work
 | Claude Code | Full lifecycle hooks | recall / search / recent / graph_query |
 | Gemini CLI | Full lifecycle hooks | recall / search / recent / graph_query |
 | VS Code Copilot | — | recall / search / recent / graph_query |
-| Codex CLI | — | recall / search / recent / graph_query |
+| Codex CLI | Partial hooks (`session_start`, `pre_tool_use`, `stop`) | recall / search / recent / graph_query |
 | OpenCode | Full lifecycle hooks | recall / search / recent / graph_query |
 | Cursor | — | recall / search / recent / graph_query |
+
+On Windows, generated hook snippets call `src/hooks/hook-runner.mjs` so assistant and
+project env vars are injected without brittle `cmd /C` quoting.
 
 ---
 
@@ -195,6 +198,8 @@ The numbers below were verified against the current repo state on **March 14, 20
 | `npm run build` | TypeScript compile integrity | ✅ PASS |
 | `node benchmark/test-session-db.mjs` | Session DB, archive, resume-chain, carry-forward regressions | ✅ **53/53** |
 | `npm run test:quality` | End-to-end handoff quality across S1/S2/S3 | ✅ **20/20** |
+| `node benchmark/test-hook-portability.mjs` | Cross-assistant hook env and startup portability | ✅ **14/14** |
+| `node benchmark/test-codex-adapter.mjs` | Codex translation + trigger + stop regressions | ✅ **17/17** |
 | `npm run test:brutal:quick` | Real-data extraction calibration (WildChat + SWE-bench) | ✅ PASS |
 | `npm run test:lifecycle:quick` | 100-cycle real-data lifecycle / archive retention observation | ✅ PASS |
 | `node benchmark/test-adversarial.mjs --model llama3.2-3b` | Hostile SLM inputs A1–A11 | ✅ **11/11** |
@@ -314,6 +319,9 @@ npm run setup       # Build + run setup CLI
 **Runtime requirements:**
 - Node.js >= 18 (all hooks, MCP server, setup CLI)
 
+**Contributor note:**
+- See `ADAPTER-AUTHORING.md` before adding or changing assistant adapters. It defines the allowed touch points, capability rules, storage rules, and current portability boundaries.
+
 ---
 
 ## Platform Support
@@ -362,9 +370,9 @@ The local synthesis tiers require GGUF models in the shared models directory con
 Examples:
 
 ```bash
-npx engram-cc download-model tier3
-npx engram-cc download-model tier3b
-npx engram-cc download-model tier3c
+engramcc --tier=tier3 --project-dir <project> --models-dir <shared-models-dir>
+engramcc --tier=tier3b --project-dir <project> --models-dir <shared-models-dir>
+engramcc --tier=tier3c --project-dir <project> --models-dir <shared-models-dir>
 ```
 
 Approximate runtime requirements:

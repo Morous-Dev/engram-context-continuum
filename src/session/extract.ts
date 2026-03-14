@@ -1,9 +1,9 @@
 /**
- * extract.ts — Session event extraction from Claude Code tool calls and user messages.
+ * extract.ts — Session event extraction from normalized tool calls and user messages.
  *
- * Responsible for: extracting structured SessionEvents from PostToolUse hook
- * inputs (13+ tool categories) and UserPromptSubmit hook inputs (decision,
- * role, intent, data). Pure functions, zero side effects, never throws.
+ * Responsible for: extracting structured SessionEvents from normalized tool-use
+ * payloads (13+ tool categories) and user prompts (decision, role, intent,
+ * data). Pure functions, zero side effects, never throws.
  *
  * Depends on: nothing (pure extraction logic, no imports).
  * Depended on by: src/hooks/posttooluse.mjs, src/hooks/userpromptsubmit.mjs.
@@ -26,23 +26,58 @@ export interface SessionEvent {
   priority: number;
 }
 
-export interface ToolCall {
-  toolName: string;
-  toolInput: Record<string, unknown>;
+export interface ExtractToolInput {
+  assistant?: string;
+  tool_name?: string;
+  toolName?: string;
+  tool_input?: Record<string, unknown>;
+  toolInput?: Record<string, unknown>;
+  tool_response?: string;
   toolResponse?: string;
-  isError?: boolean;
+  /** Optional structured output from the tool (may carry isError) */
+  tool_output?: { isError?: boolean } | null;
+  toolOutput?: { isError?: boolean } | null;
 }
 
-/**
- * Hook input shape as received from Claude Code PostToolUse hook stdin.
- * Uses snake_case to match the raw hook JSON.
- */
-export interface HookInput {
+interface NormalizedExtractInput {
+  assistant: string;
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_response?: string;
-  /** Optional structured output from the tool (may carry isError) */
-  tool_output?: { isError?: boolean };
+  tool_output?: { isError?: boolean } | null;
+}
+
+function normalizeExtractInput(input: ExtractToolInput): NormalizedExtractInput {
+  const toolInput = (
+    input.tool_input
+    ?? input.toolInput
+    ?? {}
+  );
+  return {
+    assistant: typeof input.assistant === "string" && input.assistant.trim()
+      ? input.assistant.trim()
+      : "claude-code",
+    tool_name: typeof input.tool_name === "string"
+      ? input.tool_name
+      : typeof input.toolName === "string"
+        ? input.toolName
+        : "",
+    tool_input: toolInput && typeof toolInput === "object" ? toolInput : {},
+    tool_response: typeof input.tool_response === "string"
+      ? input.tool_response
+      : typeof input.toolResponse === "string"
+        ? input.toolResponse
+        : undefined,
+    tool_output: input.tool_output ?? input.toolOutput ?? undefined,
+  };
+}
+
+function isRuleFile(filePath: string, assistant: string): boolean {
+  const normalizedAssistant = assistant.toLowerCase();
+  if (normalizedAssistant === "claude-code" || normalizedAssistant === "claude") {
+    return /CLAUDE\.md$|\.claude[\\/]/i.test(filePath);
+  }
+  return false;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -72,17 +107,17 @@ function truncateAny(value: unknown, max = 300): string {
  * Other Edit/Write/Read tool calls → emit file_edit / file_write / file_read
  * event (priority 1).
  */
-function extractFileAndRule(input: HookInput): SessionEvent[] {
-  const { tool_name, tool_input, tool_response } = input;
+function extractFileAndRule(input: NormalizedExtractInput): SessionEvent[] {
+  const { assistant, tool_name, tool_input } = input;
   const events: SessionEvent[] = [];
 
   if (tool_name === "Read") {
     const filePath = String(tool_input["file_path"] ?? "");
-    const isRuleFile = /CLAUDE\.md$|\.claude[\\/]/i.test(filePath);
+    const ruleFile = isRuleFile(filePath, assistant);
 
-    if (isRuleFile) {
+    if (ruleFile) {
       events.push({ type: "rule", category: "rule", data: truncate(filePath), priority: 1 });
-      // Capture rule file path for reference (content is NOT stored — CLAUDE.md
+      // Capture rule file path for reference (content is NOT stored — assistant
       // is already in the system prompt and storing 5000-char blobs was causing
       // the snapshot budget to overflow, producing empty session_resume XML).
       // The rule path event above is sufficient to track which rule files were loaded.
@@ -129,7 +164,7 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
  * Category 4: cwd
  * Matches the first `cd <path>` in a Bash command (handles quoted paths).
  */
-function extractCwd(input: HookInput): SessionEvent[] {
+function extractCwd(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "Bash") return [];
   const cmd = String(input.tool_input["command"] ?? "");
   const cdMatch = cmd.match(/\bcd\s+("([^"]+)"|'([^']+)'|(\S+))/);
@@ -147,7 +182,7 @@ function extractCwd(input: HookInput): SessionEvent[] {
  * stdout as "error" events. Now requires patterns at line boundaries and
  * extracts only the error-relevant lines instead of the entire tool response.
  */
-function extractError(input: HookInput): SessionEvent[] {
+function extractError(input: NormalizedExtractInput): SessionEvent[] {
   const { tool_name, tool_response, tool_output } = input;
   const response = String(tool_response ?? "");
   const isErrorFlag = tool_output?.isError === true;
@@ -218,7 +253,7 @@ const GIT_PATTERNS: Array<{ pattern: RegExp; operation: string }> = [
   { pattern: /\bgit\s+worktree\b/, operation: "worktree" },
 ];
 
-function extractGit(input: HookInput): SessionEvent[] {
+function extractGit(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "Bash") return [];
   const cmd = String(input.tool_input["command"] ?? "");
   const match = GIT_PATTERNS.find(p => p.pattern.test(cmd));
@@ -230,7 +265,7 @@ function extractGit(input: HookInput): SessionEvent[] {
  * Category 3: task
  * TodoWrite / TaskCreate / TaskUpdate tool calls.
  */
-function extractTask(input: HookInput): SessionEvent[] {
+function extractTask(input: NormalizedExtractInput): SessionEvent[] {
   const TASK_TOOLS = new Set(["TodoWrite", "TaskCreate", "TaskUpdate"]);
   if (!TASK_TOOLS.has(input.tool_name)) return [];
   const type = input.tool_name === "TaskUpdate" ? "task_update"
@@ -242,7 +277,7 @@ function extractTask(input: HookInput): SessionEvent[] {
  * Category 15: plan
  * Tracks the full plan mode lifecycle via EnterPlanMode / ExitPlanMode.
  */
-function extractPlan(input: HookInput): SessionEvent[] {
+function extractPlan(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name === "EnterPlanMode") {
     return [{ type: "plan_enter", category: "plan", data: "entered plan mode", priority: 2 }];
   }
@@ -289,7 +324,7 @@ const ENV_PATTERNS: RegExp[] = [
   /\bgo\s+(install|get)\b/, /\brustup\b/, /\basdf\b/, /\bvolta\b/, /\bdeno\s+install\b/,
 ];
 
-function extractEnv(input: HookInput): SessionEvent[] {
+function extractEnv(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "Bash") return [];
   const cmd = String(input.tool_input["command"] ?? "");
   if (!ENV_PATTERNS.some(p => p.test(cmd))) return [];
@@ -299,7 +334,7 @@ function extractEnv(input: HookInput): SessionEvent[] {
 }
 
 /** Category 10: skill — Skill tool invocations. */
-function extractSkill(input: HookInput): SessionEvent[] {
+function extractSkill(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "Skill") return [];
   return [{ type: "skill", category: "skill", data: truncate(String(input.tool_input["skill"] ?? "")), priority: 3 }];
 }
@@ -308,7 +343,7 @@ function extractSkill(input: HookInput): SessionEvent[] {
  * Category 9: subagent — Agent tool calls.
  * Completed agents (with tool_response) are P2; launched agents are P3.
  */
-function extractSubagent(input: HookInput): SessionEvent[] {
+function extractSubagent(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "Agent") return [];
   const prompt = truncate(String(input.tool_input["prompt"] ?? input.tool_input["description"] ?? ""), 200);
   const response = input.tool_response ? truncate(String(input.tool_response), 300) : "";
@@ -322,7 +357,7 @@ function extractSubagent(input: HookInput): SessionEvent[] {
 }
 
 /** Category 14: mcp — MCP tool calls (any tool starting with mcp__). */
-function extractMcp(input: HookInput): SessionEvent[] {
+function extractMcp(input: NormalizedExtractInput): SessionEvent[] {
   if (!input.tool_name.startsWith("mcp__")) return [];
   const parts = input.tool_name.split("__");
   const toolShort = parts[parts.length - 1] || input.tool_name;
@@ -343,7 +378,7 @@ function extractMcp(input: HookInput): SessionEvent[] {
  *   - Write: new file creation → "created <file>" checkpoint
  *   - Edit after Read: "modified <file>" checkpoint (edit cycle complete)
  */
-function extractCheckpoint(input: HookInput): SessionEvent[] {
+function extractCheckpoint(input: NormalizedExtractInput): SessionEvent[] {
   const { tool_name, tool_input, tool_response } = input;
   const response = String(tool_response ?? "");
 
@@ -386,7 +421,7 @@ function extractCheckpoint(input: HookInput): SessionEvent[] {
 }
 
 /** Category 6: decision — AskUserQuestion tool interactions. */
-function extractDecision(input: HookInput): SessionEvent[] {
+function extractDecision(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "AskUserQuestion") return [];
   const questions = input.tool_input["questions"];
   const questionText = Array.isArray(questions) && questions.length > 0
@@ -398,7 +433,7 @@ function extractDecision(input: HookInput): SessionEvent[] {
 }
 
 /** Category 8: env (worktree) — EnterWorktree tool. */
-function extractWorktree(input: HookInput): SessionEvent[] {
+function extractWorktree(input: NormalizedExtractInput): SessionEvent[] {
   if (input.tool_name !== "EnterWorktree") return [];
   return [{ type: "worktree", category: "env", data: truncate(`entered worktree: ${String(input.tool_input["name"] ?? "unnamed")}`), priority: 2 }];
 }
@@ -514,30 +549,32 @@ function extractData(message: string): SessionEvent[] {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Extract session events from a PostToolUse hook input.
+ * Extract session events from a normalized tool-use input.
  *
- * Accepts the raw hook JSON shape (snake_case keys) as received from stdin.
+ * Accepts the normalized ECC tool payload shape and also tolerates legacy
+ * snake_case / camelCase aliases from assistant wrappers.
  * Returns an array of zero or more SessionEvents. Never throws.
  *
- * @param input - Raw hook input from Claude Code PostToolUse stdin.
+ * @param input - Normalized tool-use input plus optional assistant context.
  * @returns Array of extracted session events (may be empty).
  */
-export function extractEvents(input: HookInput): SessionEvent[] {
+export function extractEvents(input: ExtractToolInput): SessionEvent[] {
   try {
+    const normalized = normalizeExtractInput(input);
     return [
-      ...extractFileAndRule(input),
-      ...extractCwd(input),
-      ...extractError(input),
-      ...extractGit(input),
-      ...extractEnv(input),
-      ...extractTask(input),
-      ...extractPlan(input),
-      ...extractSkill(input),
-      ...extractSubagent(input),
-      ...extractMcp(input),
-      ...extractDecision(input),
-      ...extractWorktree(input),
-      ...extractCheckpoint(input),
+      ...extractFileAndRule(normalized),
+      ...extractCwd(normalized),
+      ...extractError(normalized),
+      ...extractGit(normalized),
+      ...extractEnv(normalized),
+      ...extractTask(normalized),
+      ...extractPlan(normalized),
+      ...extractSkill(normalized),
+      ...extractSubagent(normalized),
+      ...extractMcp(normalized),
+      ...extractDecision(normalized),
+      ...extractWorktree(normalized),
+      ...extractCheckpoint(normalized),
     ];
   } catch {
     return [];

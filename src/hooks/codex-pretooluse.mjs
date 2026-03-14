@@ -7,14 +7,17 @@ import {
   getProjectDir,
   getProjectId,
   getSessionDBPath,
+  getProjectLogsDir,
 } from "./session-helpers.mjs";
 import { join, dirname } from "node:path";
+import { appendFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(HOOK_DIR, "..", "..");
 const BUILD_SESSION = join(PROJECT_ROOT, "build", "session");
 const BUILD_ADAPTERS = join(PROJECT_ROOT, "build", "adapters");
+const DEBUG_LOG = join(getProjectLogsDir(), "codex-hook-debug.log");
 
 const contextBlocks = [];
 
@@ -27,9 +30,19 @@ try {
   const assistant = process.env.ENGRAM_ASSISTANT ?? "codex";
   const timestamp = new Date().toISOString();
 
-  const { translateCodexPreToolUse } = await import(pathToFileURL(join(BUILD_ADAPTERS, "codex-plug.js")).href);
+  const { translateCodexPreToolUse, shouldCodexTriggerCompaction } = await import(pathToFileURL(join(BUILD_ADAPTERS, "codex-plug.js")).href);
   const { ingestEvent, ingestPrompt, prepareCompaction } = await import(pathToFileURL(join(BUILD_SESSION, "ingest.js")).href);
   const { SessionDB } = await import(pathToFileURL(join(BUILD_SESSION, "db.js")).href);
+
+  try {
+    appendFileSync(
+      DEBUG_LOG,
+      `[${timestamp}] pre_tool_use session=${sessionId} tool=${String(input.tool_name ?? "unknown")} keys=${Object.keys(input).join(",")}\n`,
+      "utf-8",
+    );
+  } catch {
+    // Best-effort logging only.
+  }
 
   const translated = translateCodexPreToolUse(input, {
     assistant,
@@ -47,14 +60,12 @@ try {
   const preResult = await ingestEvent(translated.preToolEvent);
   if (preResult.additionalContext) contextBlocks.push(preResult.additionalContext);
 
-  const postResult = await ingestEvent(translated.postToolEvent);
-  if (postResult.additionalContext) contextBlocks.push(postResult.additionalContext);
-
   const db = new SessionDB({ dbPath: getSessionDBPath() });
   try {
     db.ensureSession(sessionId, projectDir);
     const stats = db.getSessionStats(sessionId);
-    if ((stats?.event_count ?? 0) >= 800) {
+    const toolName = translated.preToolEvent.payload.tool_name;
+    if (shouldCodexTriggerCompaction(toolName, stats?.event_count ?? 0, stats?.compact_count ?? 0)) {
       await prepareCompaction({
         assistant,
         project_id: projectId,

@@ -1,4 +1,5 @@
 import type { ECCIngestEvent } from "../session/ingest-types.js";
+import type { SessionEvent } from "../session/extract.js";
 
 export interface CodexPreToolContext {
   assistant: string;
@@ -11,10 +12,11 @@ export interface CodexPreToolContext {
 export interface CodexHookTranslation {
   promptEvent: ECCIngestEvent | null;
   preToolEvent: ECCIngestEvent;
-  postToolEvent: ECCIngestEvent;
 }
 
-function getPromptText(input: Record<string, unknown>): string | null {
+const COMPACTION_TOOLS = new Set(["Edit", "Write", "Bash", "AskUserQuestion"]);
+
+export function getPromptText(input: Record<string, unknown>): string | null {
   const direct = input.prompt ?? input.message;
   if (typeof direct === "string" && direct.trim()) return direct.trim();
 
@@ -28,6 +30,26 @@ function getPromptText(input: Record<string, unknown>): string | null {
   }
 
   return null;
+}
+
+function buildPlannedToolEvent(toolName: string, toolInput: Record<string, unknown>): SessionEvent {
+  const context = `${toolName} ${JSON.stringify(toolInput)}`.trim().slice(0, 300);
+  return {
+    type: "tool_use",
+    category: "tool",
+    data: context,
+    priority: 3,
+  };
+}
+
+export function shouldCodexTriggerCompaction(
+  toolName: string,
+  eventCount: number,
+  compactCount: number,
+): boolean {
+  if (!COMPACTION_TOOLS.has(toolName)) return false;
+  const threshold = 900 + (compactCount * 150);
+  return eventCount >= threshold;
 }
 
 export function translateCodexPreToolUse(
@@ -71,21 +93,9 @@ export function translateCodexPreToolUse(
         tool_input: toolInput,
         tool_result: null,
         tool_output: null,
-        extracted_events: [],
-      },
-    },
-    postToolEvent: {
-      ...base,
-      event_type: "post_tool_use",
-      source_kind: "wrapper",
-      confidence: "inferred",
-      payload: {
-        kind: "post_tool_use",
-        tool_name: toolName,
-        tool_input: toolInput,
-        tool_result: null,
-        tool_output: null,
-        extracted_events: [],
+        // Codex only gives us the pre-tool hook natively. Record the planned tool
+        // at low priority rather than speculating on side effects before execution.
+        extracted_events: [buildPlannedToolEvent(toolName, toolInput)],
       },
     },
   };

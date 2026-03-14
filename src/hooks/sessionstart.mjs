@@ -3,7 +3,7 @@ import "./suppress-stderr.mjs";
 /**
  * sessionstart.mjs — SessionStart hook for super-context session continuity.
  *
- * Responsible for: injecting session knowledge into Claude's context at the
+ * Responsible for: injecting session knowledge into the assistant context at the
  * start of every session or after a compact event. Also loads the YAML handoff
  * from the previous session (if fresh, within 15 minutes) and the working
  * memory YAML for persistent cross-session preferences.
@@ -17,13 +17,14 @@ import "./suppress-stderr.mjs";
  * Depends on: suppress-stderr.mjs, session-helpers.mjs, session-directive.mjs,
  *             build/session/db.js, build/handoff/reader.js,
  *             build/memory/working.js (compiled TypeScript).
- * Depended on by: Claude Code SessionStart hook system.
+ * Depended on by: assistant SessionStart hook systems.
  */
 
 import {
   readStdin, getSessionId, getSessionDBPath,
-  getSessionEventsPath, getCleanupFlagPath, getHandoffFilePath, getProjectLogsDir,
+  getSessionEventsPath, getCleanupFlagPath, getProjectDir, getProjectLogsDir,
 } from "./session-helpers.mjs";
+import { captureAssistantStartupContext } from "./assistant-startup.mjs";
 import {
   writeSessionEventsFile, buildSessionDirective,
   getSessionEvents, getLatestSessionEvents,
@@ -141,34 +142,11 @@ try {
 
     writeFileSync(cleanupFlag, new Date().toISOString(), "utf-8");
 
-    // Proactively capture CLAUDE.md files — loaded as system context at startup,
-    // invisible to PostToolUse hooks. Read from disk so they survive compact/resume.
     const sessionId = getSessionId(input);
-    const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const projectDir = getProjectDir();
     const assistant = process.env.ENGRAM_ASSISTANT ?? "unknown";
     db.ensureSession(sessionId, projectDir);
-
-    const claudeMdPaths = [
-      join(projectDir, "CLAUDE.md"),
-      join(projectDir, ".claude", "CLAUDE.md"),
-    ];
-    for (const p of claudeMdPaths) {
-      try {
-        const content = readFileSync(p, "utf-8");
-        if (content.trim()) {
-          db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 }, "SessionStart", {
-            sourceAssistant: assistant,
-            sourceKind: "native_hook",
-            sourceConfidence: "exact",
-          });
-          db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 }, "SessionStart", {
-            sourceAssistant: assistant,
-            sourceKind: "native_hook",
-            sourceConfidence: "exact",
-          });
-        }
-      } catch { /* file doesn't exist — skip */ }
-    }
+    captureAssistantStartupContext({ assistant, projectDir, sessionId, db });
 
     db.close();
 

@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const DEBUG_LOG = join(process.cwd(), ".engram-cc", "logs", "codex-hook-debug.log");
+const DEBUG_LOG = join(process.env.ENGRAM_PROJECT_DIR ?? process.cwd(), ".engram-cc", "logs", "codex-hook-debug.log");
 
 try {
   mkdirSync(dirname(DEBUG_LOG), { recursive: true });

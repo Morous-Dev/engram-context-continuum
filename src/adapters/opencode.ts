@@ -49,10 +49,10 @@ export class OpenCodeAdapter implements AssistantAdapter {
     const buildDir = getBuildHooksDir(packageRoot);
     const config = {
       hooks: {
-        afterToolUse: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "opencode") }],
-        beforeCompress: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "opencode") }],
-        sessionStart: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "opencode") }],
-        sessionEnd: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "opencode") }],
+        afterToolUse: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "opencode", projectRoot) }],
+        beforeCompress: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "opencode", projectRoot) }],
+        sessionStart: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "opencode", projectRoot) }],
+        sessionEnd: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "opencode", projectRoot) }],
       },
     };
 

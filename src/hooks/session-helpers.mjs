@@ -19,6 +19,23 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 
+const DEFAULT_PROJECT_DIR_ENVS = ["ENGRAM_PROJECT_DIR", "GEMINI_PROJECT_DIR", "CLAUDE_PROJECT_DIR"];
+const DEFAULT_SESSION_ID_ENVS = ["ENGRAM_SESSION_ID", "GEMINI_SESSION_ID", "CLAUDE_SESSION_ID"];
+
+function listEnvNames(value, fallback) {
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (typeof value === "string" && value) return [value];
+  return fallback;
+}
+
+function firstEnvValue(names) {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "";
+}
+
 // ── Project identity ──────────────────────────────────────────────────────────
 
 /**
@@ -67,32 +84,23 @@ export function getProjectId(projectDir) {
   return freshId;
 }
 
-export function getProjectDataDir(opts = CLAUDE_OPTS) {
+export function getProjectDataDir(opts = {}) {
   const dir = join(getProjectDir(opts), ".engram-cc");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-export function getProjectSessionsDir(opts = CLAUDE_OPTS) {
+export function getProjectSessionsDir(opts = {}) {
   const dir = join(getProjectDataDir(opts), "sessions");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-export function getProjectLogsDir(opts = CLAUDE_OPTS) {
+export function getProjectLogsDir(opts = {}) {
   const dir = join(getProjectDataDir(opts), "logs");
   mkdirSync(dir, { recursive: true });
   return dir;
 }
-
-// ── Platform options ──────────────────────────────────────────────────────────
-
-/** Claude Code platform defaults. */
-const CLAUDE_OPTS = {
-  configDir: ".claude",
-  projectDirEnv: "CLAUDE_PROJECT_DIR",
-  sessionIdEnv: "CLAUDE_SESSION_ID",
-};
 
 // ── stdin helper ──────────────────────────────────────────────────────────────
 
@@ -116,13 +124,14 @@ export function readStdin() {
 
 /**
  * Get the project directory for the current session.
- * Uses the platform-specific env var, falls back to cwd.
+ * Uses the shared ECC runtime env vars first, then assistant-native env vars,
+ * then falls back to cwd.
  *
- * @param opts - Platform options (defaults to Claude Code).
+ * @param opts - Optional env override(s) for wrappers or tests.
  * @returns Absolute path to the project directory.
  */
-export function getProjectDir(opts = CLAUDE_OPTS) {
-  return process.env[opts.projectDirEnv] || process.cwd();
+export function getProjectDir(opts = {}) {
+  return firstEnvValue(listEnvNames(opts.projectDirEnv, DEFAULT_PROJECT_DIR_ENVS)) || process.cwd();
 }
 
 // ── Session ID ────────────────────────────────────────────────────────────────
@@ -133,17 +142,18 @@ export function getProjectDir(opts = CLAUDE_OPTS) {
  *           env var > ppid fallback.
  *
  * @param input - Raw hook input object from stdin.
- * @param opts  - Platform options.
+ * @param opts  - Optional env override(s) for wrappers or tests.
  * @returns Session ID string.
  */
-export function getSessionId(input, opts = CLAUDE_OPTS) {
+export function getSessionId(input, opts = {}) {
   if (input.transcript_path) {
     const match = input.transcript_path.match(/([a-f0-9-]{36})\.jsonl$/);
     if (match) return match[1];
   }
   if (input.sessionId) return input.sessionId;
   if (input.session_id) return input.session_id;
-  if (opts.sessionIdEnv && process.env[opts.sessionIdEnv]) return process.env[opts.sessionIdEnv];
+  const envSessionId = firstEnvValue(listEnvNames(opts.sessionIdEnv, DEFAULT_SESSION_ID_ENVS));
+  if (envSessionId) return envSessionId;
   return `pid-${process.ppid}`;
 }
 
@@ -156,7 +166,7 @@ export function getSessionId(input, opts = CLAUDE_OPTS) {
  * @param opts - Platform options.
  * @returns Absolute path to the SQLite DB file.
  */
-export function getSessionDBPath(opts = CLAUDE_OPTS) {
+export function getSessionDBPath(opts = {}) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
   const dir = getProjectSessionsDir(opts);
@@ -172,7 +182,7 @@ export function getSessionDBPath(opts = CLAUDE_OPTS) {
  * @param opts - Platform options.
  * @returns Absolute path to the session events markdown file.
  */
-export function getSessionEventsPath(opts = CLAUDE_OPTS) {
+export function getSessionEventsPath(opts = {}) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
   const dir = getProjectSessionsDir(opts);
@@ -188,7 +198,7 @@ export function getSessionEventsPath(opts = CLAUDE_OPTS) {
  * @param opts - Platform options.
  * @returns Absolute path to the cleanup flag file.
  */
-export function getCleanupFlagPath(opts = CLAUDE_OPTS) {
+export function getCleanupFlagPath(opts = {}) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
   const dir = getProjectSessionsDir(opts);
@@ -204,7 +214,7 @@ export function getCleanupFlagPath(opts = CLAUDE_OPTS) {
  * @param opts - Platform options.
  * @returns Absolute path to the handoff YAML file.
  */
-export function getHandoffFilePath(opts = CLAUDE_OPTS) {
+export function getHandoffFilePath(opts = {}) {
   const projectDir = getProjectDir(opts);
   const dir = join(projectDir, ".engram-cc");
   mkdirSync(dir, { recursive: true });
@@ -220,7 +230,7 @@ export function getHandoffFilePath(opts = CLAUDE_OPTS) {
  * @param opts - Platform options.
  * @returns Absolute path to the working memory YAML file.
  */
-export function getWorkingMemoryFilePath(opts = CLAUDE_OPTS) {
+export function getWorkingMemoryFilePath(opts = {}) {
   const projectDir = getProjectDir(opts);
   const dir = join(projectDir, ".engram-cc");
   mkdirSync(dir, { recursive: true });

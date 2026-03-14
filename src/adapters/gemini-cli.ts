@@ -47,19 +47,20 @@ export class GeminiCliAdapter implements AssistantAdapter {
     const settings = {
       hooks: {
         AfterTool: [
-          { matcher: "*", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "gemini-cli") }] },
+          { matcher: "*", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
         ],
         BeforeAgent: [
-          { matcher: "*", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/userpromptsubmit.mjs" --marker=${MARKER}`, "gemini-cli") }] },
+          { matcher: "*", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/userpromptsubmit.mjs" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
         ],
         PreCompress: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "gemini-cli") }] },
+          { matcher: "auto", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
         ],
         SessionStart: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "gemini-cli") }] },
+          { matcher: "startup", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
+          { matcher: "resume", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
         ],
         SessionEnd: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "gemini-cli") }] },
+          { matcher: "*", hooks: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "gemini-cli", projectRoot) }] },
         ],
       },
     };

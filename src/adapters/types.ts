@@ -29,10 +29,52 @@ export interface AdapterCapabilities {
   stop: CapabilityTier;
 }
 
-export function withAssistantEnv(command: string, assistant: string): string {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function commandQuote(value: string): string {
   return process.platform === "win32"
-    ? `cmd /C "set ENGRAM_ASSISTANT=${assistant} && ${command}"`
-    : `ENGRAM_ASSISTANT=${assistant} ${command}`;
+    ? `"${value.replace(/"/g, '\\"')}"`
+    : shellQuote(value);
+}
+
+function parseNodeCommand(command: string): { scriptPath: string; forwardedArgs: string } | null {
+  const match = command.match(/^node\s+"([^"]+)"(?:\s+(.*))?$/);
+  if (!match) return null;
+  return {
+    scriptPath: match[1],
+    forwardedArgs: match[2] ?? "",
+  };
+}
+
+function getHookRunnerPath(scriptPath: string): string {
+  const normalized = scriptPath.replace(/\\/g, "/");
+  return normalized.replace(/\/(?:src|build)\/hooks\/[^/]+$/, "/src/hooks/hook-runner.mjs");
+}
+
+export function withAssistantEnv(command: string, assistant: string, projectDir?: string): string {
+  if (process.platform === "win32") {
+    const parsed = parseNodeCommand(command);
+    if (parsed) {
+      return [
+        "node",
+        commandQuote(getHookRunnerPath(parsed.scriptPath)),
+        "--assistant",
+        commandQuote(assistant),
+        projectDir ? `--project-dir ${commandQuote(projectDir)}` : "",
+        "--script",
+        commandQuote(parsed.scriptPath),
+        parsed.forwardedArgs ? `-- ${parsed.forwardedArgs}` : "",
+      ].filter(Boolean).join(" ");
+    }
+  }
+
+  return [
+    `ENGRAM_ASSISTANT=${shellQuote(assistant)}`,
+    projectDir ? `ENGRAM_PROJECT_DIR=${shellQuote(projectDir)}` : "",
+    command,
+  ].filter(Boolean).join(" ");
 }
 
 // ── Adapter interface ─────────────────────────────────────────────────────────

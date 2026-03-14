@@ -67,6 +67,24 @@ console.log("\n  .claude/ directory read:");
   assert(events.some(e => e.type === "rule"),       ".claude/ Read → emits rule event");
 }
 
+console.log("\n  Non-Claude rule files:");
+{
+  const geminiEvents = extractEvents({
+    assistant: "gemini-cli",
+    tool_name: "Read",
+    tool_input: { file_path: "/project/CLAUDE.md" },
+  });
+  assert(geminiEvents.length === 1, "Gemini Read CLAUDE.md → only file_read event");
+  assert(!geminiEvents.some(e => e.type === "rule"), "Gemini Read CLAUDE.md → no Claude rule event");
+
+  const camelEvents = extractEvents({
+    assistant: "claude-code",
+    toolName: "Read",
+    toolInput: { file_path: "/project/CLAUDE.md" },
+  });
+  assert(camelEvents.some(e => e.type === "rule"), "camelCase toolName/toolInput still supported");
+}
+
 console.log("\n  Edit tool:");
 {
   const events = extractEvents(ev("Edit", { file_path: "src/foo.ts" }));

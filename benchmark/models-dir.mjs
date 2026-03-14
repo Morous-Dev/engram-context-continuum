@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 
 function getRuntimeProjectDir(fallback = process.cwd()) {
   return process.env.ENGRAM_PROJECT_DIR
+    || process.env.GEMINI_PROJECT_DIR
     || process.env.CLAUDE_PROJECT_DIR
     || fallback;
 }

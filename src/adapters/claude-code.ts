@@ -48,19 +48,19 @@ export class ClaudeCodeAdapter implements AssistantAdapter {
     const settings = {
       hooks: {
         PostToolUse: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "claude-code") }] },
+          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "claude-code", projectRoot) }] },
         ],
         PreCompact: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "claude-code") }] },
+          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "claude-code", projectRoot) }] },
         ],
         SessionStart: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "claude-code") }] },
+          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "claude-code", projectRoot) }] },
         ],
         UserPromptSubmit: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/userpromptsubmit.mjs" --marker=${MARKER}`, "claude-code") }] },
+          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/userpromptsubmit.mjs" --marker=${MARKER}`, "claude-code", projectRoot) }] },
         ],
         Stop: [
-          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "claude-code") }] },
+          { matcher: "", hooks: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "claude-code", projectRoot) }] },
         ],
       },
     };

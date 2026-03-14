@@ -6,10 +6,11 @@
  *   <projectDir>/.engram-cc/assistant-configs/codex-cli/. Codex uses
  *   snake_case event names in TOML format:
  *     session_start → sessionstart.mjs
- *     pre_tool_use  → posttooluse.mjs  (fires before tool, limited data — best available)
+ *     pre_tool_use  → codex-pretooluse.mjs (limited data — partial coverage only)
  *     stop          → stop.ts
- *   Note: Codex CLI has fewer hook events than Claude Code (no PreCompact,
- *   no UserPromptSubmit). This is a known limitation of the Codex hook system.
+ *   Note: Codex CLI has fewer native hook events than Claude Code. ECC currently
+ *   supports native session_start + stop, plus a partial pre_tool_use bridge.
+ *   There is no native UserPromptSubmit, PostToolUse, or PreCompact parity yet.
  * Depends on: src/adapters/detect.ts, src/adapters/local-config.ts.
  * Depended on by: src/adapters/index.ts.
  */
@@ -36,19 +37,20 @@ const MCP_END = `# ${MARKER} mcp:end`;
  *
  * @param hooksDir - Absolute src/hooks path with forward slashes.
  * @param buildDir - Absolute build/hooks path with forward slashes.
+ * @param projectRoot - Absolute target project path with native separators.
  * @returns Managed TOML block for ECC hooks.
  */
-function buildHooksBlock(hooksDir: string, buildDir: string): string {
+function buildHooksBlock(hooksDir: string, buildDir: string, projectRoot: string): string {
   return [
     HOOKS_START,
     "[[hooks.session_start]]",
-    `command = ${JSON.stringify(withAssistantEnv(`node "${hooksDir}/codex-sessionstart.mjs"`, "codex"))}`,
+    `command = ${JSON.stringify(withAssistantEnv(`node "${hooksDir}/codex-sessionstart.mjs"`, "codex", projectRoot))}`,
     "",
     "[[hooks.pre_tool_use]]",
-    `command = ${JSON.stringify(withAssistantEnv(`node "${hooksDir}/codex-pretooluse.mjs"`, "codex"))}`,
+    `command = ${JSON.stringify(withAssistantEnv(`node "${hooksDir}/codex-pretooluse.mjs"`, "codex", projectRoot))}`,
     "",
     "[[hooks.stop]]",
-    `command = ${JSON.stringify(withAssistantEnv(`node "${buildDir}/codex-stop.js"`, "codex"))}`,
+    `command = ${JSON.stringify(withAssistantEnv(`node "${buildDir}/codex-stop.js"`, "codex", projectRoot))}`,
     HOOKS_END,
     "",
   ].join("\n");
@@ -76,7 +78,7 @@ export class CodexCliAdapter implements AssistantAdapter {
   readonly capabilities = {
     session_start: "native",
     user_prompt_submit: "synthesized",
-    post_tool_use: "synthesized",
+    post_tool_use: "unsupported",
     pre_compact: "synthesized",
     stop: "native",
   } as const;
@@ -87,7 +89,7 @@ export class CodexCliAdapter implements AssistantAdapter {
 
   /**
    * Emit a project-local Codex hook snippet.
-   * Codex events are snake_case; we map them to the nearest EngramCC handler.
+   * Codex events are snake_case; ECC only provides partial hook coverage here.
    */
   registerHooks(packageRoot: string, projectRoot: string): RegistrationResult {
     return writeLocalAdapterArtifact(
@@ -95,7 +97,7 @@ export class CodexCliAdapter implements AssistantAdapter {
       "codex-cli",
       "config.hooks.toml",
       "Codex CLI hook snippet",
-      buildHooksBlock(getSrcHooksDir(packageRoot), getBuildHooksDir(packageRoot)),
+      buildHooksBlock(getSrcHooksDir(packageRoot), getBuildHooksDir(packageRoot), projectRoot),
     );
   }
 

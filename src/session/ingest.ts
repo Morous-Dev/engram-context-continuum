@@ -289,6 +289,7 @@ export async function ingestEvent(event: ECCIngestEvent): Promise<IngestResult> 
           )
             ? []
             : extractEvents({
+              assistant: event.assistant,
               tool_name: event.payload.tool_name,
               tool_input: event.payload.tool_input ?? {},
               tool_response: toolResult,

@@ -1,6 +1,6 @@
 # Engram Context Continuum (EngramCC) — Project Context
 
-Last verified: 2026-03-13
+Last verified: 2026-03-14
 This file is the project-specific companion to CLAUDE.md.
 Code and migrations win over this file when facts conflict.
 
@@ -10,13 +10,13 @@ Code and migrations win over this file when facts conflict.
 |---|---|
 | Language | TypeScript (compiled to ESM via tsc) |
 | Hooks runtime | Node.js .mjs (ES modules, no compile step) |
-| Stop hook runtime | Bun (TypeScript native, no compile step) |
+| Stop hook runtime | Node.js (compiled TypeScript: `stop.ts` → `build/hooks/stop.js`) |
 | Database | SQLite via better-sqlite3 (one .db per project) |
 | Full-text search | SQLite FTS5 virtual table |
 | Knowledge graph | SQLite tables (graph_nodes + graph_edges + BFS) |
 | Vector store | sqlite-vec extension (optional, graceful fallback) |
 | SLM Tier 2 | @huggingface/transformers ONNX — hardware-profile-aware embedding specialist (BGE-large/BGE-base/MiniLM) |
-| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B / Qwen3.5 4B / Gemma 3 4B GGUF (all 10/11 adversarial; A11 multi-compaction chain is a known gap) |
+| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B / Qwen3.5 4B / Gemma 3 4B GGUF (current verified adversarial score: 11/11 on all three after carry-forward compaction fix) |
 | Query Expander | node-llama-cpp + Gemma 3 1B QAT Q4_0 GGUF (FTS5 term expansion, optional) |
 | SLM Tier 4 | External HTTP provider (Ollama / LM Studio / Groq) |
 | Memory files | YAML (handoff.yaml, working.yaml in .engram-cc/) |
@@ -35,7 +35,7 @@ It operates as session middleware: lifecycle hooks capture events while the AI w
 a local SLM synthesizes memory offline at session end, and an MCP server serves the
 pre-digested context on demand to any connected assistant.
 
-Supported assistants: Claude Code, Gemini CLI, VS Code Copilot, Codex CLI, OpenCode, Cursor.
+Supported assistants: Claude Code, Gemini CLI, VS Code Copilot, Codex CLI, OpenCode, Cursor. Codex CLI currently has partial hook coverage plus MCP.
 
 ## 2. Priority Order
 
@@ -55,7 +55,7 @@ When facts conflict, use:
 - **Hook event flow:**
   - `UserPromptSubmit` — captures user intent, stores to DB; then embeds the prompt
     and retrieves semantically relevant past memories from VectorDB (distance < 0.60),
-    injecting them as `additionalContext` before Claude processes the message
+    injecting them as `additionalContext` before the active assistant processes the message
   - `PostToolUse` — captures tool results, file ops, errors; immediately embeds
     significant events (decision/error/task/rule) into VectorDB for within-session
     semantic memory (live continuous indexing); on Edit/Write/Bash/AskUserQuestion,
@@ -85,6 +85,8 @@ When facts conflict, use:
 **Core hooks:**
 - `src/hooks/stop.ts` — Stop hook: compressor + handoff + graph + vector pipeline
 - `src/hooks/sessionstart.mjs` — SessionStart: tiered context injection
+- `src/hooks/assistant-startup.mjs` — Assistant-specific startup capture boundary
+- `src/hooks/hook-runner.mjs` — Windows-safe hook launcher for env injection
 - `src/hooks/posttooluse.mjs` — PostToolUse: event capture
 - `src/hooks/precompact.mjs` — PreCompact: 3-layer compaction recovery (XML snapshot + SLM brief + engram retrieval); parallel on power hardware
 - `src/hooks/userpromptsubmit.mjs` — UserPromptSubmit: intent capture
@@ -117,7 +119,7 @@ When facts conflict, use:
 - `src/adapters/claude-code.ts` — Claude Code hooks + MCP registration
 - `src/adapters/gemini-cli.ts` — Gemini CLI hooks + MCP registration
 - `src/adapters/vscode-copilot.ts` — VS Code Copilot MCP registration
-- `src/adapters/codex-cli.ts` — Codex CLI MCP registration
+- `src/adapters/codex-cli.ts` — Codex CLI partial hook + MCP registration
 - `src/adapters/opencode.ts` — OpenCode hooks + MCP registration
 - `src/adapters/cursor.ts` — Cursor MCP registration
 
@@ -225,6 +227,14 @@ Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
   and merges results (archive results scored at 0.85x). PreCompact passes archive events
   to `buildResumeSnapshot()` for `renderKeyTopics()`. Lifetime retention benchmark: 0% →
   100% recall at cycle 100.
+- **Adapter portability is improved, not finished** — Shared hook runtime resolution now
+  honors `ENGRAM_PROJECT_DIR` / `ENGRAM_SESSION_ID` first, `src/hooks/stop.ts` uses the
+  shared runtime project resolver, and Claude-only startup capture moved behind
+  `src/hooks/assistant-startup.mjs` with legacy Claude env fallback preserved.
+  Windows hook commands now route through `src/hooks/hook-runner.mjs` to avoid
+  nested `cmd /C` quoting failures on spaced paths. Remaining portability debt is
+  mainly capability parity, not core pathing/extraction: Codex remains partial hooks
+  plus MCP, and startup capture is currently Claude-only by design.
 - **tier3c (Gemma 3 4B) times out at 12+ compaction cycles** — The 60s SLM timeout fires during
   marathon sessions. Gemma 3 4B is slower than Llama 3.2 3B at this task; at 12–20 cycle inputs
   it exceeds the budget and PreCompact falls back to raw context. Gemma 3 4B is still viable for
@@ -234,12 +244,6 @@ Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
   at 8+ compaction cycles. Output is still correct but unstructured; downstream fields relying on
   strict JSON schema (task_status enum, decisions[].status) may not parse. Prose fallback is safe
   for the working_context field but reduces handoff YAML structure quality.
-- **A11 multi-compaction chain synthesis gap** — All three production SLM models (Llama 3.2 3B,
-  Qwen3.5 4B, Gemma 3 4B) score 10/11 on the adversarial suite. A11 requires the model to
-  synthesize facts distributed across 3 separate compaction briefs. All models focus on the most
-  recent brief and drop earlier chains. Mitigation: FTS5 archive and vector retrieval still hold
-  those facts on-demand; the gap is in the SLM brief's in-context compression, not in retrieval.
-  The test was added after the "10/10" claim and reflects the true production score.
 - **Embedding specialist models** — Implemented (2026-03-13). Tier 2 now selects the
   embedding model based on hardware profile: extreme/power → BGE-large-en-v1.5 (768-dim),
   standard → BGE-base-en-v1.5 (768-dim), minimal → MiniLM-L6-v2 (384-dim). VectorDB
@@ -251,6 +255,7 @@ Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
 ## 10. Related Contracts
 
 - `CLAUDE.md` — universal co-developer standard (this project follows it)
+- `ADAPTER-AUTHORING.md` — rules for adding new assistant adapters safely
 - `src/hooks/README.md` — hook system documentation
 - `src/adapters/` — each adapter has inline documentation of its config file format
 - `plugin-config.yaml` — compression tier override and external provider config

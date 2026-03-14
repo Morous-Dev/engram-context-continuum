@@ -1,10 +1,11 @@
-# src/hooks — Claude Code hook entry points
+# src/hooks — Lifecycle hook entry points
 
 ## What this module is
 
-Entry points for all five Claude Code lifecycle hooks. Each file is a `.mjs`
-ES module run by Node.js. The Stop hook is compiled TypeScript (`stop.ts` →
-`build/hooks/stop.js`).
+Entry points for the normalized ECC lifecycle hooks. Assistants with native hook
+support call these directly or through thin assistant-specific wrappers. Each file
+is a `.mjs` ES module run by Node.js. The Stop hook is compiled TypeScript
+(`stop.ts` → `build/hooks/stop.js`).
 
 ## How it works end to end
 
@@ -45,6 +46,8 @@ Stop              → stop.ts                → HandoffWriter + GraphDB + Vecto
 |---|---|
 | `suppress-stderr.mjs` | Must be FIRST import in every hook. Silences better-sqlite3 stderr. |
 | `session-helpers.mjs` | Path resolution and session ID derivation. Shared by all hooks. |
+| `assistant-startup.mjs` | Assistant-specific startup-only context capture boundary. |
+| `hook-runner.mjs` | Windows-safe launcher that injects `ENGRAM_*` env vars and spawns real hook scripts. |
 | `session-directive.mjs` | Builds the `<session_knowledge>` XML block from session events. |
 | `posttooluse.mjs` | Event capture + live indexing + subconscious retrieval (vector + FTS5 dual-path). |
 | `precompact.mjs` | SLM brief + engram retrieval + XML snapshot. Hardware-profile-aware parallelism. |
@@ -59,7 +62,7 @@ On every user message (> 20 chars), userpromptsubmit.mjs:
 1. Embeds the user's prompt via the hardware-profile-aware ONNX model
 2. Searches `vec_procedures` for semantically relevant past events (distance < 0.60)
 3. Injects matching memories as `<subconscious_context source="semantic_memory">` in
-   `additionalContext` — Claude sees this before processing the user's message
+   `additionalContext` — the assistant sees this before processing the user's message
 
 This is the primary "Jarvis" path: every question the user asks is matched against
 the accumulated memory of past decisions, errors, and facts from prior sessions.
@@ -115,6 +118,8 @@ on CPU) so there is no contention.
 - Dynamic imports use `pathToFileURL()` for Windows compatibility.
 - Import paths from hooks to build: `join(HOOK_DIR, "..", "..", "build", ...)`.
 - The stop hook (TypeScript) uses direct imports, not dynamic imports.
+- Generated hook snippets set `ENGRAM_ASSISTANT` / `ENGRAM_PROJECT_DIR` explicitly.
+- On Windows, generated snippets call `hook-runner.mjs` instead of nested `cmd /C` wrappers.
 - Failure in any sub-task (SLM brief, engram retrieval, subconscious) is always
   swallowed silently — the session continues without the extra context.
 
