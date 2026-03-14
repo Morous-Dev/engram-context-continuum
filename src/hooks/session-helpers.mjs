@@ -3,8 +3,8 @@
  *
  * Responsible for: deriving session IDs from hook inputs, computing per-project
  * SQLite DB paths, session events file paths, cleanup flag paths, handoff YAML
- * paths, and working memory YAML paths. All paths use the engram-cc
- * subdirectory under ~/.claude/ to avoid conflicting with other plugins.
+ * paths, and working memory YAML paths. All ECC artifacts stay inside the
+ * current project under .engram-cc/.
  *
  * Depends on: node:crypto (SHA256 hashing), node:path, node:fs, node:os.
  * Depended on by: all .mjs hooks in this directory.
@@ -14,9 +14,8 @@
  * getHandoffPath() and getWorkingMemoryPath() helpers.
  */
 
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { execSync } from "node:child_process";
 
@@ -66,6 +65,24 @@ export function getProjectId(projectDir) {
   const freshId = randomUUID();
   try { writeFileSync(idFile, freshId, "utf-8"); } catch { /* non-fatal */ }
   return freshId;
+}
+
+export function getProjectDataDir(opts = CLAUDE_OPTS) {
+  const dir = join(getProjectDir(opts), ".engram-cc");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function getProjectSessionsDir(opts = CLAUDE_OPTS) {
+  const dir = join(getProjectDataDir(opts), "sessions");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function getProjectLogsDir(opts = CLAUDE_OPTS) {
+  const dir = join(getProjectDataDir(opts), "logs");
+  mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 // ── Platform options ──────────────────────────────────────────────────────────
@@ -134,7 +151,7 @@ export function getSessionId(input, opts = CLAUDE_OPTS) {
 
 /**
  * Return the per-project session DB path using stable project UUID.
- * Path: ~/.engram-cc/sessions/<uuid>.db
+ * Path: <projectDir>/.engram-cc/sessions/<uuid>.db
  *
  * @param opts - Platform options.
  * @returns Absolute path to the SQLite DB file.
@@ -142,8 +159,7 @@ export function getSessionId(input, opts = CLAUDE_OPTS) {
 export function getSessionDBPath(opts = CLAUDE_OPTS) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
-  const dir = join(homedir(), ".engram-cc", "sessions");
-  mkdirSync(dir, { recursive: true });
+  const dir = getProjectSessionsDir(opts);
   return join(dir, `${id}.db`);
 }
 
@@ -151,7 +167,7 @@ export function getSessionDBPath(opts = CLAUDE_OPTS) {
 
 /**
  * Return the per-project session events markdown file path.
- * Path: ~/.engram-cc/sessions/<uuid>-events.md
+ * Path: <projectDir>/.engram-cc/sessions/<uuid>-events.md
  *
  * @param opts - Platform options.
  * @returns Absolute path to the session events markdown file.
@@ -159,8 +175,7 @@ export function getSessionDBPath(opts = CLAUDE_OPTS) {
 export function getSessionEventsPath(opts = CLAUDE_OPTS) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
-  const dir = join(homedir(), ".engram-cc", "sessions");
-  mkdirSync(dir, { recursive: true });
+  const dir = getProjectSessionsDir(opts);
   return join(dir, `${id}-events.md`);
 }
 
@@ -168,7 +183,7 @@ export function getSessionEventsPath(opts = CLAUDE_OPTS) {
 
 /**
  * Return the per-project cleanup flag file path.
- * Path: ~/.engram-cc/sessions/<uuid>.cleanup
+ * Path: <projectDir>/.engram-cc/sessions/<uuid>.cleanup
  *
  * @param opts - Platform options.
  * @returns Absolute path to the cleanup flag file.
@@ -176,8 +191,7 @@ export function getSessionEventsPath(opts = CLAUDE_OPTS) {
 export function getCleanupFlagPath(opts = CLAUDE_OPTS) {
   const projectDir = getProjectDir(opts);
   const id  = getProjectId(projectDir);
-  const dir = join(homedir(), ".engram-cc", "sessions");
-  mkdirSync(dir, { recursive: true });
+  const dir = getProjectSessionsDir(opts);
   return join(dir, `${id}.cleanup`);
 }
 
@@ -185,7 +199,7 @@ export function getCleanupFlagPath(opts = CLAUDE_OPTS) {
 
 /**
  * Return the per-project handoff YAML file path.
- * Path: [projectDir]/.claude/engram-cc/handoff.yaml
+ * Path: <projectDir>/.engram-cc/handoff.yaml
  *
  * @param opts - Platform options.
  * @returns Absolute path to the handoff YAML file.
@@ -201,7 +215,7 @@ export function getHandoffFilePath(opts = CLAUDE_OPTS) {
 
 /**
  * Return the per-project working memory YAML file path.
- * Path: [projectDir]/.claude/engram-cc/working.yaml
+ * Path: <projectDir>/.engram-cc/working.yaml
  *
  * @param opts - Platform options.
  * @returns Absolute path to the working memory YAML file.

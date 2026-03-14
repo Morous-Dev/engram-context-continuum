@@ -15,7 +15,7 @@
  * do not reliably produce sentence embeddings.
  *
  * Model file: llama-3.2-3b-instruct-q5_k_m.gguf (~2.32 GB)
- * Location:   ~/.engram-cc/models/
+ * Location:   shared models dir configured in <projectDir>/.engram-cc/config.json
  * RAM needed:  ~4 GB free
  *
  * Depends on: node-llama-cpp (optional native npm package),
@@ -26,12 +26,12 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { Compressor, CompressionResult, EmbedResult, StructuredHandoff } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
 import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
+import { getProjectModelsDir, getRuntimeProjectDir } from "../project-id.js";
 
 // ── Model registry ─────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ const MODEL_FILE = "llama-3.2-3b-instruct-q5_k_m.gguf";
  * @returns Absolute path to the GGUF model file.
  */
 function getModelPath(): string {
-  return join(homedir(), ".engram-cc", "models", MODEL_FILE);
+  return join(getProjectModelsDir(getRuntimeProjectDir()), MODEL_FILE);
 }
 
 // ── Prose fallback prompt ────────────────────────────────────────────────────
@@ -150,8 +150,13 @@ export class Tier3Compressor implements Compressor {
   private grammar: LlamaGrammarInstance | null = null;
 
   constructor() {
-    this.modelPath = getModelPath();
-    this._available = existsSync(this.modelPath);
+    try {
+      this.modelPath = getModelPath();
+      this._available = existsSync(this.modelPath);
+    } catch {
+      this.modelPath = "";
+      this._available = false;
+    }
   }
 
   isAvailable(): boolean {

@@ -18,9 +18,18 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { execSync } from "node:child_process";
+
+export interface ECCProjectConfig {
+  sharedModelsDir?: string;
+}
+
+export function getRuntimeProjectDir(fallback = process.cwd()): string {
+  return process.env.ENGRAM_PROJECT_DIR
+    || process.env.CLAUDE_PROJECT_DIR
+    || fallback;
+}
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
@@ -108,17 +117,102 @@ export function getProjectId(projectDir: string): string {
 // ── DB path helper ──────────────────────────────────────────────────────────
 
 /**
+ * Return the project-local EngramCC data directory.
+ *
+ * Path: <projectDir>/.engram-cc
+ *
+ * @param projectDir - Absolute path to the project directory.
+ * @returns Absolute path to the project's EngramCC data directory.
+ */
+export function getProjectDataDir(projectDir: string): string {
+  const dir = join(projectDir, ".engram-cc");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function getProjectConfigPath(projectDir: string): string {
+  return join(getProjectDataDir(projectDir), "config.json");
+}
+
+export function readProjectConfig(projectDir: string): ECCProjectConfig {
+  const path = getProjectConfigPath(projectDir);
+  if (!existsSync(path)) return {};
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as ECCProjectConfig;
+    return typeof parsed === "object" && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function writeProjectConfig(projectDir: string, config: ECCProjectConfig): void {
+  const path = getProjectConfigPath(projectDir);
+  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf-8");
+}
+
+export function resolveSharedModelsDir(projectDir: string): string | null {
+  const configured = readProjectConfig(projectDir).sharedModelsDir?.trim();
+  if (!configured) return null;
+  return isAbsolute(configured) ? configured : resolve(projectDir, configured);
+}
+
+/**
+ * Return the project-local sessions directory.
+ *
+ * Path: <projectDir>/.engram-cc/sessions
+ *
+ * @param projectDir - Absolute path to the project directory.
+ * @returns Absolute path to the project's session artifacts directory.
+ */
+export function getProjectSessionsDir(projectDir: string): string {
+  const dir = join(getProjectDataDir(projectDir), "sessions");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Return the configured models directory for this project.
+ *
+ * @param projectDir - Absolute path to the project directory.
+ * @returns Absolute path to the project's shared model directory.
+ */
+export function getProjectModelsDir(projectDir: string): string {
+  const dir = resolveSharedModelsDir(projectDir);
+  if (!dir) {
+    throw new Error(
+      `Shared models directory is not configured for ${projectDir}. Run engramcc --project-dir "${projectDir}" --models-dir <path>.`,
+    );
+  }
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
+ * Return the project-local logs directory.
+ *
+ * Path: <projectDir>/.engram-cc/logs
+ *
+ * @param projectDir - Absolute path to the project directory.
+ * @returns Absolute path to the project's log directory.
+ */
+export function getProjectLogsDir(projectDir: string): string {
+  const dir = join(getProjectDataDir(projectDir), "logs");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+/**
  * Return the per-project SQLite DB path using the stable project UUID.
  * This replaces all SHA256(projectDir)-based path derivations.
  *
- * Path: ~/.engram-cc/sessions/<uuid>.db
+ * Path: <projectDir>/.engram-cc/sessions/<uuid>.db
  *
  * @param projectDir - Absolute path to the project directory.
  * @returns Absolute path to the project's SQLite DB file.
  */
 export function getProjectDBPath(projectDir: string): string {
   const id  = getProjectId(projectDir);
-  const dir = join(homedir(), ".engram-cc", "sessions");
-  mkdirSync(dir, { recursive: true });
+  const dir = getProjectSessionsDir(projectDir);
   return join(dir, `${id}.db`);
 }

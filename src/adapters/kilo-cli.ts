@@ -1,23 +1,22 @@
 /**
- * cursor.ts — EngramCC adapter for Cursor.
+ * kilo-cli.ts — EngramCC adapter for Kilo CLI.
  *
- * What this file is: generates project-local Cursor setup snippets.
- * Responsible for: writing hook and MCP examples under
- *   <projectDir>/.engram-cc/assistant-configs/cursor/. Cursor is a fork of
- *   VS Code and uses identical hook event names and config formats to VS Code
- *   Copilot (PostToolUse, PreCompact, SessionStart, Stop, UserPromptSubmit).
+ * What this file is: generates project-local Kilo CLI setup snippets.
+ * Responsible for: writing a local MCP example under
+ *   <projectDir>/.engram-cc/assistant-configs/kilo-cli/. Hook registration is
+ *   intentionally left disabled until Kilo's hook model is verified separately.
  * Depends on: src/adapters/detect.ts, src/adapters/local-config.ts.
  * Depended on by: src/adapters/index.ts.
  */
 
-import { isCursorInstalled } from "./detect.js";
+import { isKiloInstalled } from "./detect.js";
 import type { AssistantAdapter, RegistrationResult } from "./types.js";
 import { getMcpServerPath, writeLocalAdapterArtifact } from "./local-config.js";
 
 const MARKER = "engram-cc";
 
-export class CursorAdapter implements AssistantAdapter {
-  readonly name = "Cursor";
+export class KiloCliAdapter implements AssistantAdapter {
+  readonly name = "Kilo CLI";
   readonly capabilities = {
     session_start: "unsupported",
     user_prompt_submit: "unsupported",
@@ -27,27 +26,27 @@ export class CursorAdapter implements AssistantAdapter {
   } as const;
 
   isInstalled(): boolean {
-    return isCursorInstalled();
+    return isKiloInstalled();
   }
 
   /**
-   * Cursor remains MCP-read-only. Emit a local note rather than touching user config.
+   * Hook registration is intentionally deferred. Emit a local note only.
    */
   registerHooks(_packageRoot: string, projectRoot: string): RegistrationResult {
     return writeLocalAdapterArtifact(
       projectRoot,
-      "cursor",
+      "kilo-cli",
       "hooks.txt",
-      "Cursor hook note",
-      "Hooks are not supported for Cursor in ECC local-only mode. Use the MCP snippet only.",
+      "Kilo CLI hook note",
+      "Hooks are not registered for Kilo CLI. The hook/runtime contract is still unverified.",
     );
   }
 
   /**
-   * Emit a project-local Cursor MCP snippet.
+   * Emit a project-local Kilo MCP snippet.
    */
   registerMcp(packageRoot: string, projectRoot: string): RegistrationResult {
-    const mcp = {
+    const config = {
       mcpServers: {
         [MARKER]: { command: "node", args: [getMcpServerPath(packageRoot)] },
       },
@@ -55,10 +54,10 @@ export class CursorAdapter implements AssistantAdapter {
 
     return writeLocalAdapterArtifact(
       projectRoot,
-      "cursor",
-      "mcp.json",
-      "Cursor MCP snippet",
-      JSON.stringify(mcp, null, 2),
+      "kilo-cli",
+      "mcp_settings.json",
+      "Kilo CLI MCP snippet",
+      JSON.stringify(config, null, 2),
     );
   }
 }

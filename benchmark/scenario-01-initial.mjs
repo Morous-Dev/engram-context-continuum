@@ -34,9 +34,7 @@ mkdirSync(PROJECT_DIR, { recursive: true });
 mkdirSync(join(PROJECT_DIR, '.engram-cc'), { recursive: true });
 
 const { SessionDB } = await import(pathToFileURL(join(BUILD, 'session', 'db.js')).href);
-const { getProjectId } = await import(pathToFileURL(join(BUILD, 'project-id.js')).href);
-const { homedir } = await import('node:os');
-const dbDir  = join(homedir(), '.engram-cc', 'sessions');
+const dbDir  = join(PROJECT_DIR, '.engram-cc', 'sessions');
 mkdirSync(dbDir, { recursive: true });
 
 // Use a bench-specific DB path so we don't pollute the real project DB

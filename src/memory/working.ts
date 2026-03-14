@@ -36,6 +36,8 @@ export interface WorkingMemory {
   frequently_modified_files: string[];
   /** Most recent session ID — for linking handoff to working memory. */
   last_session_id: string;
+  /** Assistant that last wrote this working memory file. */
+  last_written_by: string;
 }
 
 /** Session data used to update working memory after a session ends. */
@@ -44,6 +46,7 @@ export interface SessionUpdateData {
   projectDir: string;
   decisions: string[];
   filesModified: string[];
+  lastWrittenBy?: string;
   userPreferences?: string;
   codebaseConventions?: string;
 }
@@ -120,6 +123,7 @@ export function createDefaultWorkingMemory(projectDir: string): WorkingMemory {
     persistent_decisions: [],
     frequently_modified_files: [],
     last_session_id: "",
+    last_written_by: "unknown",
   };
 }
 
@@ -158,6 +162,7 @@ export function mergeWorkingMemory(
     ...base,
     last_updated: new Date().toISOString(),
     last_session_id: update.sessionId,
+    last_written_by: update.lastWrittenBy || base.last_written_by,
     persistent_decisions: mergedDecisions,
     frequently_modified_files: topFiles,
     // Only update preferences/conventions if the caller provided non-empty values

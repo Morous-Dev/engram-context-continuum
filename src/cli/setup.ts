@@ -4,28 +4,31 @@
  * What this file is: cross-platform interactive installer, run as
  *   `npx engram-cc` or `engramcc` after global install.
  * Responsible for: detecting hardware, selecting the right compression tier,
- *   creating ~/.engram-cc/ directories, registering hooks and MCP servers
- *   for all detected AI coding assistants, and downloading the GGUF model.
+ *   creating project-local .engram-cc/ directories, configuring a shared models
+ *   directory, generating assistant setup snippets, and downloading the GGUF model.
  * Depends on: node:os, node:fs, node:path, node:child_process, node:readline,
- *   src/cli/download-model.ts, src/compression/types.ts, src/adapters/index.ts.
+ *   src/cli/download-model.ts, src/compression/types.ts, src/adapters/index.ts,
+ *   src/project-id.ts.
  * Depended on by: nothing — this is the CLI entry point (bin: "engramcc").
  *
  * Flags:
  *   --yes           skip all prompts, accept defaults
  *   --no-model      skip GGUF download (hooks + dirs still registered)
  *   --tier=<id>     force a specific tier (tier1|tier2|tier3|tier3b|tier3c|tier4)
+ *   --project-dir   target project directory for all ECC state (default: cwd)
+ *   --models-dir    shared models directory (required in non-interactive mode)
  */
 
 import { totalmem } from "node:os";
-import { mkdirSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
+import { mkdirSync, existsSync, statSync } from "node:fs";
+import { dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import { downloadModel, isModelDownloaded, getModelSpec } from "./download-model.js";
 import { registerAll } from "../adapters/index.js";
 import type { CompressionTier } from "../compression/types.js";
+import { getProjectDataDir, readProjectConfig, writeProjectConfig } from "../project-id.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -36,8 +39,6 @@ const VERSION = "0.1.0";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PACKAGE_ROOT = resolve(__dirname, "..", "..");
-
-const DATA_DIR = join(homedir(), ".engram-cc");
 
 // ── Hardware detection ───────────────────────────────────────────────────────
 
@@ -131,38 +132,49 @@ function selectTier(hw: HardwareInfo): TierInfo {
 // ── Directories ──────────────────────────────────────────────────────────────
 
 /**
- * Create the required data directories under ~/.engram-cc/.
+ * Create the required data directories under <projectDir>/.engram-cc/.
  * Each subdirectory has a specific purpose:
  *   sessions/ — per-project SQLite databases
- *   handoff/  — session handoff YAML files
- *   working/  — working memory YAML files
- *   models/   — GGUF model files for Tier 3 compression
+ *   logs/     — hook and debug logs
+ *   assistant-configs/ — local setup snippets for supported assistants
+ * Shared models live outside the project data dir and are configured separately.
  */
-function createDirectories(): void {
-  for (const sub of ["sessions", "handoff", "working", "models"]) {
-    const path = join(DATA_DIR, sub);
+function createDirectories(dataDir: string): void {
+  for (const sub of ["sessions", "logs", "assistant-configs"]) {
+    const path = join(dataDir, sub);
     mkdirSync(path, { recursive: true });
     console.log(`  [OK] ${path}`);
   }
 }
 
+function ensureDirectory(path: string, label: string): string {
+  const resolved = resolve(path);
+  if (existsSync(resolved) && !statSync(resolved).isDirectory()) {
+    throw new Error(`${label} is not a folder: ${resolved}`);
+  }
+  mkdirSync(resolved, { recursive: true });
+  return resolved;
+}
+
 // ── Adapter registration ──────────────────────────────────────────────────────
 
 /**
- * Run registerAll() across all detected AI coding assistants.
- * Prints a per-assistant, per-operation summary to stdout.
+ * Run registerAll() across all supported AI coding assistants.
+ * Prints a per-assistant, per-operation summary to stdout. No user-profile
+ * config is modified; setup artifacts are written into the current repo.
  * Never throws — all errors are captured and printed as warnings.
  *
  * @param packageRoot - Absolute path to the installed EngramCC package root.
+ * @param projectRoot - Absolute path to the target project directory.
  */
-function registerAdapters(packageRoot: string): void {
-  const results = registerAll(packageRoot);
+function registerAdapters(packageRoot: string, projectRoot: string): void {
+  const results = registerAll(packageRoot, projectRoot);
   for (const r of results) {
-    if (!r.installed) {
-      console.log(`  [-] ${r.adapter}: not detected, skipped`);
-      continue;
-    }
     console.log(`  [>] ${r.adapter}`);
+    console.log(`      detected=${r.installed ? "yes" : "no"} local_only=yes`);
+    console.log(
+      `      capabilities start=${r.capabilities.session_start} prompt=${r.capabilities.user_prompt_submit} post=${r.capabilities.post_tool_use} compact=${r.capabilities.pre_compact} stop=${r.capabilities.stop}`,
+    );
     if (r.hooks) {
       const icon = r.hooks.success ? (r.hooks.skipped ? "~" : "OK") : "X";
       console.log(`      hooks [${icon}] ${r.hooks.message}`);
@@ -172,6 +184,30 @@ function registerAdapters(packageRoot: string): void {
       console.log(`      MCP   [${icon}] ${r.mcp.message}`);
     }
   }
+}
+
+function getFlagValue(args: string[], flag: string): string | undefined {
+  const prefixed = `${flag}=`;
+  const inline = args.find(arg => arg.startsWith(prefixed));
+  if (inline) return inline.slice(prefixed.length);
+
+  const index = args.indexOf(flag);
+  if (index >= 0) return args[index + 1];
+  return undefined;
+}
+
+function resolveProjectRoot(args: string[]): string {
+  const requested = getFlagValue(args, "--project-dir");
+  const projectRoot = resolve(requested ?? process.cwd());
+
+  if (!existsSync(projectRoot)) {
+    throw new Error(`Project directory does not exist: ${projectRoot}`);
+  }
+  if (!statSync(projectRoot).isDirectory()) {
+    throw new Error(`Project directory is not a folder: ${projectRoot}`);
+  }
+
+  return projectRoot;
 }
 
 // ── Prompt helpers ───────────────────────────────────────────────────────────
@@ -195,6 +231,56 @@ async function confirm(question: string, defaultYes = true): Promise<boolean> {
   }
 }
 
+async function promptText(question: string, defaultValue?: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    if (defaultValue) return defaultValue;
+    throw new Error(`Missing interactive input for: ${question}`);
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const suffix = defaultValue ? ` [default: ${defaultValue}] ` : " ";
+    const answer = await rl.question(`${question}${suffix}`);
+    return answer.trim() || defaultValue || "";
+  } finally {
+    rl.close();
+  }
+}
+
+function recommendModelsDir(projectRoot: string): string {
+  if (process.platform === "win32") {
+    const driveRoot = parse(projectRoot).root || "C:\\";
+    return join(driveRoot, "Engram Context Continuum", "models");
+  }
+  return join(dirname(projectRoot), "Engram Context Continuum", "models");
+}
+
+async function resolveModelsDir(args: string[], projectRoot: string, skipPrompts: boolean): Promise<string> {
+  const configured = readProjectConfig(projectRoot).sharedModelsDir;
+  const requested = getFlagValue(args, "--models-dir");
+
+  if (requested) {
+    return ensureDirectory(requested, "Shared models directory");
+  }
+  if (configured) {
+    return ensureDirectory(configured, "Shared models directory");
+  }
+  if (skipPrompts || !process.stdin.isTTY) {
+    throw new Error("Shared models directory is required in non-interactive mode. Use --models-dir <path>.");
+  }
+
+  const recommended = recommendModelsDir(projectRoot);
+  console.log("  EngramCC requires a shared models directory.");
+  console.log("  This folder is reused across projects and may consume several GB.");
+  console.log(`  Recommended: ${recommended}`);
+  const answer = await promptText("  Enter shared models directory:", recommended);
+  if (!answer.trim()) {
+    throw new Error("Shared models directory is required.");
+  }
+
+  return ensureDirectory(answer, "Shared models directory");
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -209,12 +295,19 @@ async function main(): Promise<void> {
   const skipPrompts = args.includes("--yes") || !process.stdin.isTTY;
   const skipModel   = args.includes("--no-model");
   const tierOverride = args.find(a => a.startsWith("--tier="))?.split("=")[1] as CompressionTier | undefined;
+  const projectRoot = resolveProjectRoot(args);
+  const dataDir = getProjectDataDir(projectRoot);
+  const modelsDir = await resolveModelsDir(args, projectRoot, skipPrompts);
+  writeProjectConfig(projectRoot, { ...readProjectConfig(projectRoot), sharedModelsDir: modelsDir });
 
   console.log("");
   console.log("===================================================");
   console.log(`  EngramCC  v${VERSION}  —  Engram Context Continuum`);
   console.log("  Universal AI memory: session handoff + context bank");
   console.log("===================================================");
+  console.log("");
+  console.log(`  Project: ${projectRoot}`);
+  console.log(`  Shared models: ${modelsDir}`);
   console.log("");
 
   // Step 1: Hardware
@@ -234,12 +327,13 @@ async function main(): Promise<void> {
 
   // Step 2: Directories
   console.log("[2/4] Creating data directories...");
-  createDirectories();
+  createDirectories(dataDir);
+  console.log(`  [OK] ${modelsDir}`);
   console.log("");
 
-  // Step 3: Register hooks + MCP for all detected assistants
-  console.log("[3/4] Registering hooks and MCP servers...");
-  registerAdapters(PACKAGE_ROOT);
+  // Step 3: Generate local-only hook + MCP snippets
+  console.log("[3/4] Generating local assistant setup snippets...");
+  registerAdapters(PACKAGE_ROOT, projectRoot);
   console.log("");
 
   // Step 4: Model
@@ -249,14 +343,14 @@ async function main(): Promise<void> {
     console.log(`  No model file needed for ${effective.tier}.`);
   } else if (skipModel) {
     const spec = getModelSpec(effective.tier);
-    console.log(`  Skipped (--no-model). Download later with:`);
+      console.log(`  Skipped (--no-model). Download later with:`);
     console.log(`    engramcc --tier=${effective.tier}`);
     if (spec) {
       console.log(`    Or manually: hf download ${spec.hfRepo} ${spec.hfFile}`);
-      console.log(`    Place in: ${DATA_DIR}/models/ as ${spec.localFile}`);
+      console.log(`    Place in: ${modelsDir} as ${spec.localFile}`);
     }
   } else {
-    const alreadyHave = isModelDownloaded(effective.tier);
+    const alreadyHave = isModelDownloaded(effective.tier, projectRoot);
     let doDownload = !alreadyHave;
 
     if (!alreadyHave && !skipPrompts) {
@@ -267,7 +361,7 @@ async function main(): Promise<void> {
     }
 
     if (doDownload) {
-      const ok = await downloadModel(effective.tier);
+      const ok = await downloadModel(effective.tier, projectRoot);
       if (!ok) process.exitCode = 1;
     } else if (alreadyHave) {
       console.log(`  [OK] Model already present.`);
@@ -279,8 +373,9 @@ async function main(): Promise<void> {
   console.log("");
   console.log("===================================================");
   console.log("  Done! Start a new AI coding session to activate.");
-  console.log("  Verify: check ~/.engram-cc/sessions/");
-  console.log("          after your first session ends.");
+  console.log(`  Verify: check ${join(dataDir, "sessions")}`);
+  console.log(`          and ${join(dataDir, "assistant-configs")}.`);
+  console.log(`  Models: ${modelsDir}`);
   console.log("===================================================");
   console.log("");
 }

@@ -19,6 +19,22 @@ export interface RegistrationResult {
   message: string;
 }
 
+export type CapabilityTier = "native" | "synthesized" | "unsupported";
+
+export interface AdapterCapabilities {
+  session_start: CapabilityTier;
+  user_prompt_submit: CapabilityTier;
+  post_tool_use: CapabilityTier;
+  pre_compact: CapabilityTier;
+  stop: CapabilityTier;
+}
+
+export function withAssistantEnv(command: string, assistant: string): string {
+  return process.platform === "win32"
+    ? `cmd /C "set ENGRAM_ASSISTANT=${assistant} && ${command}"`
+    : `ENGRAM_ASSISTANT=${assistant} ${command}`;
+}
+
 // ── Adapter interface ─────────────────────────────────────────────────────────
 
 /**
@@ -32,6 +48,8 @@ export interface RegistrationResult {
 export interface AssistantAdapter {
   /** Display name shown in the setup CLI output. */
   readonly name: string;
+  /** ECC lifecycle coverage for this adapter. */
+  readonly capabilities: AdapterCapabilities;
 
   /**
    * Returns true if this assistant appears to be installed on this machine.
@@ -44,14 +62,16 @@ export interface AssistantAdapter {
    * Idempotent — running twice must not create duplicate entries.
    *
    * @param packageRoot - Absolute path to the installed EngramCC package root.
+   * @param projectRoot - Absolute path to the target project directory.
    */
-  registerHooks(packageRoot: string): RegistrationResult;
+  registerHooks(packageRoot: string, projectRoot: string): RegistrationResult;
 
   /**
    * Write the EngramCC MCP server entry to the assistant's MCP config file(s).
    * Idempotent — running twice must not create duplicate entries.
    *
    * @param packageRoot - Absolute path to the installed EngramCC package root.
+   * @param projectRoot - Absolute path to the target project directory.
    */
-  registerMcp(packageRoot: string): RegistrationResult;
+  registerMcp(packageRoot: string, projectRoot: string): RegistrationResult;
 }

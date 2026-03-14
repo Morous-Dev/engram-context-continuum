@@ -2,8 +2,8 @@
  * tier3b.ts — node-llama-cpp GGUF compressor: Qwen3.5 4B Q4_K_M.
  *
  * Responsible for: compressing session context using Qwen3.5 4B via
- * node-llama-cpp. Scored 10/10 on adversarial benchmark. Upgraded from
- * Qwen3.5 2B (9/10) which failed A10 (long article noise masking real work).
+ * node-llama-cpp. Scored 10/11 on adversarial benchmark. Upgraded from
+ * Qwen3.5 2B, which failed A10 (long article noise masking real work).
  *
  * Output mode: grammar-constrained JSON ("diff-mode"). Falls back to prose
  * if grammar creation fails. Falls back to Tier1 if model is missing.
@@ -20,7 +20,7 @@
  * The prompt includes /no_think to disable it for fast, direct output.
  *
  * Model file: Qwen3.5-4B-Q4_K_M.gguf (~2.74 GB)
- * Location:   ~/.engram-cc/models/
+ * Location:   shared models dir configured in <projectDir>/.engram-cc/config.json
  * RAM needed:  ~3.5 GB VRAM (GPU) or ~3 GB RAM (CPU)
  *
  * Depends on: node-llama-cpp (optional native npm package),
@@ -31,25 +31,25 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { Compressor, CompressionResult, EmbedResult, StructuredHandoff } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
-import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
+import { HANDOFF_SCHEMA, buildCompactBriefPrompt, buildDiffModePrompt } from "./schema.js";
+import { getProjectModelsDir, getRuntimeProjectDir } from "../project-id.js";
 
 // ── Model file ─────────────────────────────────────────────────────────────────
 
 const MODEL_FILE = "Qwen3.5-4B-Q4_K_M.gguf";
 
 function getModelPath(): string {
-  return join(homedir(), ".engram-cc", "models", MODEL_FILE);
+  return join(getProjectModelsDir(getRuntimeProjectDir()), MODEL_FILE);
 }
 
 // ── Prose fallback prompt ────────────────────────────────────────────────────
 
 /**
- * Build prose prompt with /no_think prepended for Qwen 3.5 2B.
+ * Build prose prompt with /no_think prepended for Qwen 3.5 4B.
  */
 function buildProsePrompt(text: string, maxRatio: number): string {
   const targetWords = Math.floor(text.split(/\s+/).length / maxRatio);
@@ -145,8 +145,13 @@ export class Tier3bCompressor implements Compressor {
   private grammar: LlamaGrammarInstance | null = null;
 
   constructor() {
-    this.modelPath = getModelPath();
-    this._available = existsSync(this.modelPath);
+    try {
+      this.modelPath = getModelPath();
+      this._available = existsSync(this.modelPath);
+    } catch {
+      this.modelPath = "";
+      this._available = false;
+    }
   }
 
   isAvailable(): boolean {
@@ -154,7 +159,7 @@ export class Tier3bCompressor implements Compressor {
   }
 
   /**
-   * Lazily load the Qwen 3.5 2B model and create the JSON grammar.
+   * Lazily load the Qwen 3.5 4B model and create the JSON grammar.
    *
    * GPU strategy: uses ignoreMemorySafetyChecks:true to bypass the VRAM
    * estimator, which over-estimates KV cache for Qwen 3.5's hybrid
@@ -208,7 +213,7 @@ export class Tier3bCompressor implements Compressor {
   }
 
   /**
-   * Compress text using Qwen 3.5 2B. Tries diff-mode (JSON) first,
+   * Compress text using Qwen 3.5 4B. Tries diff-mode (JSON) first,
    * falls back to prose, falls back to Tier1 if unavailable.
    *
    * @param text     - Text to compress.
@@ -221,13 +226,15 @@ export class Tier3bCompressor implements Compressor {
     try {
       const cleaned = preprocessSessionData(text);
       const targetTokens = Math.ceil(cleaned.split(/\s+/).length / maxRatio * 1.5);
+      const useGrammar = this.grammar && promptBuilder !== buildCompactBriefPrompt;
+      const grammar = useGrammar ? this.grammar : null;
       // JSON is ~50% more token-heavy than prose; grammar mode gets a higher cap.
-      const maxTokens = this.grammar
+      const maxTokens = grammar
         ? Math.max(300, Math.min(targetTokens, 800))
         : Math.max(200, Math.min(targetTokens, 600));
 
       // ── Diff-mode: grammar-constrained JSON output ────────────────────────
-      if (this.grammar) {
+      if (grammar) {
         try {
           // /no_think prepended for Qwen's thinking mode suppression
           const prompt = `/no_think\n\n${(promptBuilder ?? buildDiffModePrompt)(cleaned)}`;
@@ -236,10 +243,10 @@ export class Tier3bCompressor implements Compressor {
             temperature: 0.1,
             topK: 1,
             repeatPenalty: 1.05,
-            grammar: this.grammar,
+            grammar,
           });
 
-          const parsed = this.grammar.parse(raw) as StructuredHandoff;
+          const parsed = grammar.parse(raw) as StructuredHandoff;
           if (parsed && parsed.current_task) {
             const compressed = JSON.stringify(parsed);
             return {
@@ -252,8 +259,10 @@ export class Tier3bCompressor implements Compressor {
               structured: parsed,
             };
           }
-        } catch {
-          console.error("[EngramCC:tier3b] diff-mode failed, falling back to prose");
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          console.error(`[EngramCC:tier3b] diff-mode failed: ${reason}`);
+          console.error("[EngramCC:tier3b] falling back to prose");
         }
       }
 

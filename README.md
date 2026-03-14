@@ -20,7 +20,9 @@ EngramCC solves this at the infrastructure level — not by prompting harder, bu
 npx engram-cc
 ```
 
-The setup CLI auto-detects which AI assistants are installed, selects the best local SLM for your hardware, downloads it, and registers hooks + MCP with each assistant. No configuration required.
+Run it from the project root you want ECC to manage, or pass `--project-dir <path>`.
+
+The setup CLI detects your hardware, prepares a project-local `.engram-cc/` workspace, asks for a shared models directory, and generates assistant hook/MCP snippets under `.engram-cc/assistant-configs/`. No user-home config is modified.
 
 ---
 
@@ -103,20 +105,20 @@ EngramCC injects context surgically, not blindly:
 
 ## Local SLM Pipeline
 
-EngramCC synthesizes session memory using a local SLM — zero API calls for its own processing.
+EngramCC synthesizes session memory using local models first — zero external API calls for its own compaction, handoff, and retrieval support.
 
 The setup CLI detects your hardware and selects the best available tier:
 
 | Tier | Model | RAM needed | What it does |
 |---|---|---|---|
 | 1 | Rule-based | 0 | Always-on heuristic extraction |
-| 2 | MiniLM-L6-v2 ONNX | ~400 MB | Embeddings via @huggingface/transformers |
-| 3 | Llama 3.2 3B Q5_K_M | ~4 GB | Full synthesis via node-llama-cpp |
+| 2 | MiniLM-L6-v2 ONNX | ~400 MB | Embeddings via `@huggingface/transformers` |
+| 3 | Llama 3.2 3B Q5_K_M | ~4 GB | Primary local synthesis tier |
+| 3b | Qwen3.5 4B Q4_K_M | ~3.5 GB | Alternate synthesis tier, strong multilingual/coding performance |
+| 3c | Gemma 3 4B QAT Q4_0 | ~3 GB | Alternate synthesis tier, strong structured reasoning |
 | 4 | Ollama / LM Studio / Groq | user-provided | External HTTP provider |
 
-**Why Llama 3.2 3B?** We tested Qwen 2.5 1.5B, Llama 3.2 3B, and Phi-4 Mini 3.8B on three critical tasks: code-aware description, conflict resolution, and intent extraction. Llama 3.2 3B scored 3/3. The other two hallucinated that unresolved errors were fixed — a disqualifier for a memory system.
-
-Models are stored in `~/.engram-cc/models/` and downloaded once. Tiers auto-cascade: if Tier 3 is unavailable, Tier 2 runs; if Tier 2 is unavailable, Tier 1 runs. Core functionality is never blocked.
+Models are stored in a shared directory chosen during `engramcc` setup and saved in `<projectDir>/.engram-cc/config.json`. Tiers auto-cascade: if no Tier 3 model is available, Tier 2 runs; if Tier 2 is unavailable, Tier 1 runs. Core memory capture is never blocked.
 
 ---
 
@@ -135,15 +137,16 @@ Resolution order: `.ecc-id` file → git root commit hash → fresh UUIDv4 (writ
 ## Data Locations
 
 ```
-~/.engram-cc/
+<projectDir>/.engram-cc/
 ├── sessions/
 │   └── <uuid>.db               ← SQLite DB per project (all memory tiers)
-└── models/
-    └── <model>.gguf             ← Downloaded GGUF models (shared across projects)
+├── assistant-configs/          ← Local hook/MCP snippets per assistant
+├── config.json                 ← Project config, including shared models path
+├── handoff.yaml                ← Session handoff (hot resume data)
+└── working.yaml                ← Cross-session working memory
 
-<projectDir>/.engram-cc/
-├── handoff.yaml                 ← Session handoff (hot resume data)
-└── working.yaml                 ← Cross-session working memory
+<chosenModelsRoot>/Engram Context Continuum/models/
+└── <model>.gguf                ← Shared GGUF models reused across projects
 ```
 
 All data is local. No network calls for core operation. No credentials, tokens, or API keys required.
@@ -168,14 +171,134 @@ When connected via MCP, any assistant can query EngramCC directly:
 Override compression tier or external provider in `plugin-config.yaml`:
 
 ```yaml
-# Force a specific compression tier (default: auto-detect)
-compression_tier: 3a
+# Force a specific compression tier (default: auto)
+compression:
+  tier: "tier3b"
 
-# External provider (Tier 4) config
-external_provider:
-  url: http://localhost:11434/api/generate
-  model: llama3.2
+  # Tier 4 only
+  external:
+    provider: "ollama"
+    model: "phi4-mini"
+    base_url: "http://localhost:11434"
 ```
+
+---
+
+## Benchmarks
+
+The numbers below were verified against the current repo state on **March 14, 2026** after the carry-forward compaction fix. They reflect what was actually run, not historical bests.
+
+### Verified Benchmark Runs
+
+| Command | What it measures | Current result |
+|---|---|---|
+| `npm run build` | TypeScript compile integrity | ✅ PASS |
+| `node benchmark/test-session-db.mjs` | Session DB, archive, resume-chain, carry-forward regressions | ✅ **53/53** |
+| `npm run test:quality` | End-to-end handoff quality across S1/S2/S3 | ✅ **20/20** |
+| `npm run test:brutal:quick` | Real-data extraction calibration (WildChat + SWE-bench) | ✅ PASS |
+| `npm run test:lifecycle:quick` | 100-cycle real-data lifecycle / archive retention observation | ✅ PASS |
+| `node benchmark/test-adversarial.mjs --model llama3.2-3b` | Hostile SLM inputs A1–A11 | ✅ **11/11** |
+| `node benchmark/test-adversarial.mjs --model qwen` | Hostile SLM inputs A1–A11 | ✅ **11/11** |
+| `node benchmark/test-adversarial.mjs --model gemma3-4b` | Hostile SLM inputs A1–A11 | ✅ **11/11** |
+| `node benchmark/test-tier-comparison.mjs` | Cross-tier compaction retention (4→20 cycles) | ✅ **38/38** on `tier3`, `tier3b`, `tier3c` |
+| `node benchmark/test-scale.mjs` | Prompt-length stability | ✅ Llama **16/16** · Qwen **15/16** |
+| `node benchmark/test-compaction-marathon.mjs` | Multi-compaction memory retention | ✅ **53/53** |
+| `node benchmark/test-diffmode.mjs` | Grammar-constrained JSON output | ✅ PASS for Llama 3.2 3B + Qwen3.5 4B |
+
+### What Those Results Mean
+
+#### Handoff Quality
+
+`npm run test:quality` exercises the full path from session events to next-session context injection.
+
+| Scenario | Assertions | Result |
+|---|---|---|
+| S1 — Initial session | 6/6 | ✅ |
+| S2 — Hot resume | 5/5 | ✅ |
+| S3 — Marathon / cold start | 9/9 | ✅ |
+
+**Total: 20/20**
+
+#### Real-Data Retrieval / Retention
+
+`npm run test:brutal:quick` and `npm run test:lifecycle:quick` use public external datasets:
+- WildChat-1M coding conversations
+- SWE-bench GitHub issue statements
+
+Current verified observations:
+- extraction brutal calibration: **PASS**
+- adversarial extractor traps: **15/15**
+- chain phase `extract → store → search → snapshot`: **PASS**
+- lifecycle checkpoints: **100% / 80% / 80% / 100%** FTS5 recall at cycles 25 / 50 / 75 / 100
+- cycle 100 recall by source: **WildChat 5/7 (71%)**, **SWE-bench 13/13 (100%)**
+
+The two misses in the lifecycle run were low-signal terms (`nothing`, `creator`), not archive corruption.
+
+#### SLM Adversarial Robustness
+
+The adversarial suite is the hardest accuracy benchmark in the repo: code walls, stack traces, multilingual sessions, flip-flop errors, domain jargon, buried current tasks, and multi-compaction chains.
+
+Current verified scores:
+
+| Model | Score |
+|---|---|
+| Llama 3.2 3B Q5_K_M | **11/11** |
+| Qwen3.5 4B Q4_K_M | **11/11** |
+| Gemma 3 4B QAT Q4_0 | **11/11** |
+
+This matters because **A11 used to be the real gap**. It now passes after the deterministic carry-forward state was added to the compaction chain.
+
+#### SLM Scale Stability
+
+`node benchmark/test-scale.mjs` probes prompt growth from 128 to 985 words.
+
+| Model | Result |
+|---|---|
+| Llama 3.2 3B | **16/16** |
+| Qwen3.5 4B | **15/16** |
+
+Current caveat:
+- Qwen 4B had **one** miss at S4 (985 words) on the no-hallucination check.
+
+#### Cross-Tier Compaction Retention
+
+`node benchmark/test-tier-comparison.mjs` runs the same 4→20 cycle compaction stress test across all three production GGUF tiers.
+
+| Tier | Result |
+|---|---|
+| `tier3` — Llama 3.2 3B | **38/38** |
+| `tier3b` — Qwen3.5 4B | **38/38** |
+| `tier3c` — Gemma 3 4B | **38/38** |
+
+At the time of this README update, the verified token savings vs raw snapshot were:
+- `tier3`: **24–26%**
+- `tier3b`: **16–23%**
+- `tier3c`: **20–28%**
+
+#### Multi-Compaction Marathon
+
+`node benchmark/test-compaction-marathon.mjs` simulates long-running sessions across 4, 8, 12, 16, and 20 compaction cycles.
+
+Current verified result:
+- **53/53 assertions passed**
+- all anchor facts survived through **20 compaction cycles**
+
+### Important Caveats
+
+- `tier3` still occasionally falls back from grammar-constrained diff-mode to prose in some runs. Correctness stayed green in the verified suites above, but the fallback still exists.
+- Qwen 4B is strong overall, but its current scale run is **15/16**, not perfect.
+- The old `A11` failure is no longer the current state and should not be cited as a live weakness.
+- `benchmark/test-160k-real.mjs` was **not rerun after the carry-forward patch**, so its older numbers are intentionally omitted from the headline claims here.
+
+### Bottom-Line Read
+
+ECC is now strong in the places that matter most for a CLI memory substrate:
+- real-data extraction and retention
+- end-to-end handoff quality
+- chained compaction continuity
+- cross-tier SLM robustness
+
+The retrieval layer remains the long-term safety net. The SLM layer is now good enough to carry forward session state across compactions without the old A11 collapse.
 
 ---
 
@@ -232,15 +355,22 @@ sudo dnf groupinstall "Development Tools"
 
 If `npm install` fails with `gyp ERR!` or `node-pre-gyp` errors, installing the build tools above and re-running `npm install` will fix it.
 
-### Troubleshooting: Tier 3 (node-llama-cpp) not available
+### Troubleshooting: Local SLM tier not available
 
-Tier 3 requires the Llama 3.2 3B GGUF model (~2.32 GB) in `~/.engram-cc/models/`. If not present, EngramCC falls back to Tier 2 (embeddings) or Tier 1 (rule-based). To enable Tier 3:
+The local synthesis tiers require GGUF models in the shared models directory configured for the project. If no supported Tier 3 model is present, EngramCC falls back to Tier 2 (embeddings) or Tier 1 (rule-based).
+
+Examples:
 
 ```bash
 npx engram-cc download-model tier3
+npx engram-cc download-model tier3b
+npx engram-cc download-model tier3c
 ```
 
-Requires ~4 GB free RAM at runtime.
+Approximate runtime requirements:
+- `tier3` Llama 3.2 3B: ~4 GB RAM
+- `tier3b` Qwen3.5 4B: ~3.5 GB RAM
+- `tier3c` Gemma 3 4B: ~3 GB RAM
 
 ### Troubleshooting: Vector store not active
 

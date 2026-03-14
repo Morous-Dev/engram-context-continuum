@@ -32,11 +32,18 @@
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { getBenchmarkModelsDir } from './models-dir.mjs';
 
-const MODELS_DIR = join(homedir(), '.engram-cc', 'models');
+const MODELS_DIR = (() => {
+  try {
+    return getBenchmarkModelsDir();
+  } catch (error) {
+    console.error(`\n  ${error.message}`);
+    process.exit(1);
+  }
+})();
 const THIS_FILE  = fileURLToPath(import.meta.url);
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -48,13 +55,6 @@ const MODELS = [
     file:                     'llama-3.2-3b-instruct-q5_k_m.gguf',
     noThink:                  false,
     ignoreMemorySafetyChecks: false,
-  },
-  {
-    id:                       'qwen3.5-2b',
-    label:                    'Qwen 3.5 2B   (tier3b)',
-    file:                     'qwen3.5-2b-q5_k_m.gguf',
-    noThink:                  true,
-    ignoreMemorySafetyChecks: true,
   },
   // ── Gemma 3 4B QAT — high-quality candidate ───────────────────────────────
   // IFEval 90.2% — highest of any sub-5B model. QAT Q4_0 preserves near-
@@ -746,7 +746,8 @@ Actual work done this session:
 
   // ── A11: Multi-compaction chain ─────────────────────────────────────────────
   // Simulates the input shape produced by buildSynthesisInput() after the chain
-  // fix: prior compaction briefs prepended before the tail events.
+  // fix: a labeled carry-forward block plus prior compaction briefs prepended
+  // before the tail events.
   // Signal facts are distributed across all 3 cycles — the model must synthesize
   // from the full arc to pass all 4 evaluators.
   //
@@ -757,6 +758,19 @@ Actual work done this session:
     id: 'A11',
     name: 'Multi-compaction chain — must synthesize from full session arc',
     input: `
+Carry-forward state from prior compaction cycles:
+Carried current task: Auth middleware work began for GraphQL context
+Carried next step: Continue debugging the WebSocket headers crash in extractToken
+Persistent decisions:
+- [FINAL] API migration: migrated from REST API to GraphQL
+- [FINAL] GraphQL server: Apollo Server v4 with Express adapter
+- [FINAL] CSS framework: Tailwind CSS (Bootstrap removed project-wide)
+Architecture anchors:
+- The team migrated from a REST API to GraphQL and set up Apollo Server v4 with the Express adapter.
+- Tailwind CSS replaced Bootstrap as the final styling standard across the project.
+Persistent unresolved errors:
+- [UNRESOLVED] Cannot read properties of undefined reading 'headers' at extractToken on WebSocket connections
+---
 Session history from prior compaction cycles:
 [Cycle 1] The team migrated from a REST API to GraphQL. Set up Apollo Server v4 with Express adapter and defined User, Product, and Order schema types. Key architectural decision: switched CSS framework from Bootstrap to Tailwind CSS (final choice — Bootstrap removed, Tailwind configured project-wide). All REST endpoints remain active in parallel during the migration. 4 files modified. No open errors at end of cycle 1.
 

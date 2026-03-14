@@ -4,21 +4,23 @@
  * What this file is: downloads the correct GGUF model for the user's machine tier.
  * Responsible for: trying hf CLI first (handles resume + auth), falling back to
  *   Node.js fetch, showing progress, and renaming files to the exact names that
- *   tier3.ts expects in ~/.engram-cc/models/.
- * Depends on: node:fs, node:path, node:os, node:child_process, node:stream,
- *   src/compression/types.ts.
+ *   the shared models directory expects for the target project.
+ * Depends on: node:fs, node:path, node:child_process, node:stream,
+ *   src/compression/types.ts, src/project-id.ts.
  * Depended on by: src/cli/setup.ts.
  */
 
 import { existsSync, createWriteStream, renameSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { CompressionTier } from "../compression/types.js";
+import { getProjectModelsDir } from "../project-id.js";
 
-export const MODELS_DIR = join(homedir(), ".engram-cc", "models");
+export function getModelsDir(projectDir = process.cwd()): string {
+  return getProjectModelsDir(projectDir);
+}
 
 // ── Model registry ──────────────────────────────────────────────────────────
 
@@ -63,6 +65,16 @@ const MODEL_REGISTRY: Record<string, ModelSpec> = {
     localFile: "gemma-3-4b-it-qat-q4_0.gguf",
     sizeDesc: "~2.37 GB",
   },
+  // query-expander: Gemma 3 1B QAT Q4_0 — lightweight FTS5 query expansion.
+  // Not a compression tier — runs independently in PostToolUse to generate
+  // semantic search terms (~30-80ms warm). Optional: FTS5 falls back to
+  // plain word-splitting if this model is absent.
+  "query-expander": {
+    hfRepo: "bartowski/google_gemma-3-1b-it-qat-GGUF",
+    hfFile: "google_gemma-3-1b-it-qat-Q4_0.gguf",
+    localFile: "google_gemma-3-1b-it-qat-Q4_0.gguf",
+    sizeDesc: "~689 MB",
+  },
   // REJECTED: SmolLM3 3B produces empty outputs with node-llama-cpp LlamaChatSession.
   // Root cause: chat-template incompatibility — the model generates <think>...</think>
   // blocks that get stripped, leaving empty responses. Not usable until node-llama-cpp
@@ -77,8 +89,8 @@ const MODEL_REGISTRY: Record<string, ModelSpec> = {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-function localPath(localFile: string): string {
-  return join(MODELS_DIR, localFile);
+function localPath(localFile: string, projectDir = process.cwd()): string {
+  return join(getModelsDir(projectDir), localFile);
 }
 
 /**
@@ -87,10 +99,10 @@ function localPath(localFile: string): string {
  * @param tier - The compression tier to check (tier3 / tier3b / tier3c).
  * @returns true if the model file is present and non-empty.
  */
-export function isModelDownloaded(tier: string): boolean {
+export function isModelDownloaded(tier: string, projectDir = process.cwd()): boolean {
   const spec = MODEL_REGISTRY[tier];
   if (!spec) return false;
-  const p = localPath(spec.localFile);
+  const p = localPath(spec.localFile, projectDir);
   return existsSync(p) && statSync(p).size > 0;
 }
 
@@ -114,20 +126,21 @@ export function getModelSpec(tier: string): ModelSpec | null {
  * @param spec - The model to download.
  * @returns true if the expected local file is present after the attempt.
  */
-function tryHfCli(spec: ModelSpec): boolean {
+function tryHfCli(spec: ModelSpec, projectDir = process.cwd()): boolean {
   const bins = ["hf", "huggingface-cli"];
   const utf8Env = { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8" };
+  const modelsDir = getModelsDir(projectDir);
 
   for (const bin of bins) {
     try {
-      execFileSync(bin, ["download", spec.hfRepo, spec.hfFile, "--local-dir", MODELS_DIR], {
+      execFileSync(bin, ["download", spec.hfRepo, spec.hfFile, "--local-dir", modelsDir], {
         env: utf8Env,
         stdio: "inherit",
         timeout: 600_000,
       });
       // HF downloads with the original HF filename — rename to what tier3.ts expects
-      const downloaded = join(MODELS_DIR, spec.hfFile);
-      const target = localPath(spec.localFile);
+      const downloaded = join(modelsDir, spec.hfFile);
+      const target = localPath(spec.localFile, projectDir);
       if (existsSync(downloaded) && downloaded !== target) renameSync(downloaded, target);
       return existsSync(target) && statSync(target).size > 0;
     } catch {
@@ -149,11 +162,11 @@ function tryHfCli(spec: ModelSpec): boolean {
  * @returns true if the file was fully downloaded and placed at localFile.
  * @throws on HTTP error or stream failure — caller handles.
  */
-async function fetchDownload(spec: ModelSpec): Promise<boolean> {
+async function fetchDownload(spec: ModelSpec, projectDir = process.cwd()): Promise<boolean> {
   const url =
     `https://huggingface.co/${spec.hfRepo}/resolve/main/${encodeURIComponent(spec.hfFile)}`;
-  const tmpPath = localPath(spec.localFile) + ".incomplete";
-  const finalPath = localPath(spec.localFile);
+  const tmpPath = localPath(spec.localFile, projectDir) + ".incomplete";
+  const finalPath = localPath(spec.localFile, projectDir);
 
   console.log(`    URL: ${url}`);
   const res = await fetch(url, { redirect: "follow" });
@@ -203,17 +216,17 @@ async function fetchDownload(spec: ModelSpec): Promise<boolean> {
  * @returns true if the model is present after this call (downloaded or pre-existing).
  *          Returns false on download failure — never throws.
  */
-export async function downloadModel(tier: CompressionTier): Promise<boolean> {
+export async function downloadModel(tier: CompressionTier, projectDir = process.cwd()): Promise<boolean> {
   const spec = MODEL_REGISTRY[tier];
   if (!spec) {
     // Tiers 1, 2, 4 — no local GGUF needed
     return true;
   }
 
-  mkdirSync(MODELS_DIR, { recursive: true });
+  mkdirSync(getModelsDir(projectDir), { recursive: true });
 
-  if (isModelDownloaded(tier)) {
-    const bytes = statSync(localPath(spec.localFile)).size;
+  if (isModelDownloaded(tier, projectDir)) {
+    const bytes = statSync(localPath(spec.localFile, projectDir)).size;
     console.log(
       `  [OK] Already present: ${spec.localFile} (${(bytes / 1_073_741_824).toFixed(2)} GB)`,
     );
@@ -223,14 +236,14 @@ export async function downloadModel(tier: CompressionTier): Promise<boolean> {
   console.log(`  Downloading ${spec.localFile} (${spec.sizeDesc})...`);
 
   // Strategy 1: hf CLI (resume support, auth, native progress)
-  if (tryHfCli(spec)) {
+  if (tryHfCli(spec, projectDir)) {
     console.log(`  [OK] ${spec.localFile}`);
     return true;
   }
 
   // Strategy 2: Node.js fetch fallback
   try {
-    const ok = await fetchDownload(spec);
+    const ok = await fetchDownload(spec, projectDir);
     if (ok) {
       console.log(`  [OK] ${spec.localFile}`);
       return true;
@@ -241,7 +254,7 @@ export async function downloadModel(tier: CompressionTier): Promise<boolean> {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`  [X] Download failed: ${msg}`);
     console.error(`  Manual fallback: https://huggingface.co/${spec.hfRepo}`);
-    console.error(`  Save as: ${localPath(spec.localFile)}`);
+    console.error(`  Save as: ${localPath(spec.localFile, projectDir)}`);
     return false;
   }
 }

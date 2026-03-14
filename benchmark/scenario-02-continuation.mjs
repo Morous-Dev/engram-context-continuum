@@ -21,7 +21,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { seed, ev } from './seed-helpers.mjs';
 import { mustContain, mustNotContain } from './assertions.mjs';
@@ -76,7 +76,7 @@ writeFileSync(
 );
 
 // ── Seed events ───────────────────────────────────────────────────────────────
-const dbDir  = join(homedir(), '.engram-cc', 'sessions');
+const dbDir  = join(PROJECT_DIR, '.engram-cc', 'sessions');
 mkdirSync(dbDir, { recursive: true });
 const dbPath = join(dbDir, 'bench-s02.db');
 if (existsSync(dbPath)) rmSync(dbPath);

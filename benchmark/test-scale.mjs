@@ -29,11 +29,18 @@
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { getBenchmarkModelsDir } from './models-dir.mjs';
 
-const MODELS_DIR = join(homedir(), '.engram-cc', 'models');
+const MODELS_DIR = (() => {
+  try {
+    return getBenchmarkModelsDir();
+  } catch (error) {
+    console.error(`\n  ${error.message}`);
+    process.exit(1);
+  }
+})();
 const THIS_FILE  = fileURLToPath(import.meta.url);
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -47,9 +54,9 @@ const MODELS = [
     ignoreMemorySafetyChecks: false,
   },
   {
-    id:                       'qwen3.5-2b',
-    label:                    'Qwen 3.5 2B   (tier3b)',
-    file:                     'qwen3.5-2b-q5_k_m.gguf',
+    id:                       'qwen3.5-4b',
+    label:                    'Qwen 3.5 4B   (tier3b)',
+    file:                     'Qwen3.5-4B-Q4_K_M.gguf',
     noThink:                  true,
     ignoreMemorySafetyChecks: true,
   },

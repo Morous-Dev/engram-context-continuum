@@ -22,7 +22,7 @@ import "./suppress-stderr.mjs";
 
 import {
   readStdin, getSessionId, getSessionDBPath,
-  getSessionEventsPath, getCleanupFlagPath, getHandoffFilePath,
+  getSessionEventsPath, getCleanupFlagPath, getHandoffFilePath, getProjectLogsDir,
 } from "./session-helpers.mjs";
 import {
   writeSessionEventsFile, buildSessionDirective,
@@ -31,7 +31,6 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
 
 function escapeXML(s) {
   if (typeof s !== "string") return String(s);
@@ -146,10 +145,10 @@ try {
     // invisible to PostToolUse hooks. Read from disk so they survive compact/resume.
     const sessionId = getSessionId(input);
     const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    const assistant = process.env.ENGRAM_ASSISTANT ?? "unknown";
     db.ensureSession(sessionId, projectDir);
 
     const claudeMdPaths = [
-      join(homedir(), ".claude", "CLAUDE.md"),
       join(projectDir, "CLAUDE.md"),
       join(projectDir, ".claude", "CLAUDE.md"),
     ];
@@ -157,8 +156,16 @@ try {
       try {
         const content = readFileSync(p, "utf-8");
         if (content.trim()) {
-          db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 }, "SessionStart");
-          db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 }, "SessionStart");
+          db.insertEvent(sessionId, { type: "rule", category: "rule", data: p, priority: 1 }, "SessionStart", {
+            sourceAssistant: assistant,
+            sourceKind: "native_hook",
+            sourceConfidence: "exact",
+          });
+          db.insertEvent(sessionId, { type: "rule_content", category: "rule", data: content, priority: 1 }, "SessionStart", {
+            sourceAssistant: assistant,
+            sourceKind: "native_hook",
+            sourceConfidence: "exact",
+          });
         }
       } catch { /* file doesn't exist — skip */ }
     }
@@ -218,9 +225,8 @@ try {
   try {
     const { appendFileSync } = await import("node:fs");
     const { join: pjoin } = await import("node:path");
-    const { homedir: phomedir } = await import("node:os");
     appendFileSync(
-      pjoin(phomedir(), ".engram-cc", "sessionstart-debug.log"),
+      pjoin(getProjectLogsDir(), "sessionstart-debug.log"),
       `[${new Date().toISOString()}] ${err?.message || err}\n${err?.stack || ""}\n`,
     );
   } catch { /* ignore logging failure */ }

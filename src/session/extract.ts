@@ -88,7 +88,10 @@ function extractFileAndRule(input: HookInput): SessionEvent[] {
       // The rule path event above is sufficient to track which rule files were loaded.
     }
 
-    events.push({ type: "file_read", category: "file", data: truncate(filePath), priority: 1 });
+    // Reads are context (what was examined), not actions (what was changed).
+    // P2 prevents reads from crowding out edits/writes (P1) and user-semantic
+    // events under FIFO pressure in long sessions.
+    events.push({ type: "file_read", category: "file", data: truncate(filePath), priority: 2 });
     return events;
   }
 
@@ -418,10 +421,18 @@ const DECISION_PATTERNS: RegExp[] = [
 // or discussions, not concise directive decisions.
 const MAX_DECISION_MESSAGE_LENGTH = 300;
 
+// Matches fenced code blocks (```...```) for stripping before pattern checks.
+// Code snippets often contain directive-looking comments ("// use Redis instead")
+// that are NOT the user's own decisions and would otherwise be false positives.
+const CODE_BLOCK_RE = /```[\s\S]*?```/g;
+
 /** Category 6: decision — User corrections and approach selections. */
 function extractUserDecision(message: string): SessionEvent[] {
   if (message.length > MAX_DECISION_MESSAGE_LENGTH) return [];
-  if (!DECISION_PATTERNS.some(p => p.test(message))) return [];
+  // Strip markdown code blocks before checking patterns — code comments like
+  // "// use Redis instead of X" look like directives but are not user decisions.
+  const stripped = message.replace(CODE_BLOCK_RE, "");
+  if (!DECISION_PATTERNS.some(p => p.test(stripped))) return [];
   return [{ type: "decision", category: "decision", data: truncate(message, 300), priority: 2 }];
 }
 
@@ -438,9 +449,15 @@ function extractRole(message: string): SessionEvent[] {
 }
 
 const INTENT_PATTERNS: Array<{ mode: string; pattern: RegExp }> = [
-  { mode: "investigate", pattern: /\b(why|how does|explain|understand|what is|analyze|debug|look into)\b/i },
-  { mode: "implement",   pattern: /\b(create|add|build|implement|write|make|develop|fix)\b/i },
-  { mode: "discuss",     pattern: /\b(think about|consider|should we|what if|pros and cons|opinion)\b/i },
+  // "raises/throws" added after SWE-bench calibration: GitHub bug reports describe
+  // errors with "it raises a ValueError" — these should classify as investigate.
+  { mode: "investigate", pattern: /\b(why|how does|explain|understand|what is|analyze|debug|look into|raises?|throws?)\b/i },
+  // "refactor/migrate/convert/remove" added after SWE-bench calibration: GitHub feature
+  // requests commonly say "please refactor X" or "let's remove the legacy Y".
+  { mode: "implement",   pattern: /\b(create|add|build|implement|write|make|develop|fix|refactor|migrate|convert|remove)\b/i },
+  // "which is better / which one" and "compare / versus" added after real-world
+  // calibration showed these common comparison requests were not matched.
+  { mode: "discuss",     pattern: /\b(think about|consider|should we|what if|pros and cons|opinion|which is better|which one|compare|versus)\b/i },
   { mode: "review",      pattern: /\b(review|check|audit|verify|test|validate)\b/i },
 ];
 
@@ -448,13 +465,50 @@ const INTENT_PATTERNS: Array<{ mode: string; pattern: RegExp }> = [
 function extractIntent(message: string): SessionEvent[] {
   const match = INTENT_PATTERNS.find(({ pattern }) => pattern.test(message));
   if (!match) return [];
-  return [{ type: "intent", category: "intent", data: truncate(match.mode), priority: 4 }];
+  // P3 (not P4): user intent is at least as valuable as glob/search results.
+  // At P4, intent events were always first-evicted, losing the user's conceptual
+  // thread while retaining structural metadata. P3 keeps them alive longer.
+  return [{ type: "intent", category: "intent", data: truncate(match.mode), priority: 3 }];
 }
 
-/** Category 12: data — Large user-pasted data references (message > 1KB). */
+// Stop words filtered out when extracting key terms — ECC vocabulary (intent modes,
+// checkpoint labels) + common English function words that are not domain signals.
+// OVERSIZE: extract.ts is ~548 lines due to this stop set + extractKeyTerms helper.
+// Split plan: move user-message extractors to extract-user.ts when next refactor lands.
+const DATA_STOP = new Set("implement investigate review discuss function import export return undefined boolean string number object interface class async await promise error fetch response request handler module component service repository controller provider factory middleware decorator parameter argument variable constant namespace generic abstract prototype constructor extends implements static readonly private public protected override callback closure generator iterator async yield Symbol Promise Array Object String Number Boolean BigInt Error Function RegExp Date Map Set WeakMap WeakSet Buffer Promise".split(" ").map(s => s.toLowerCase()));
+
+/**
+ * Extract up to `limit` distinctive key terms from a message.
+ * Used to front-load domain vocabulary into data events so FTS5 can find
+ * terms that appear anywhere in the message, not just the first 300 chars.
+ *
+ * @param message - Raw message text to scan.
+ * @param limit   - Maximum number of terms to return.
+ * @returns Lowercase tokens sorted longest-first (longer = more distinctive).
+ */
+function extractKeyTerms(message: string, limit = 5): string[] {
+  // Use {4,} (5+ chars) to match anchor collection heuristic — 5-char domain terms
+  // like "flask", "react", "nginx", "query" are meaningful vocabulary anchors.
+  const tokens = (message.match(/\b[a-zA-Z][a-zA-Z0-9]{4,}\b/g) ?? [])
+    .filter(t => !DATA_STOP.has(t.toLowerCase()));
+  const unique = [...new Set(tokens.map(t => t.toLowerCase()))];
+  return unique.sort((a, b) => b.length - a.length).slice(0, limit);
+}
+
+/** Category 12: data — User messages >300 chars (lowered from 1024). */
 function extractData(message: string): SessionEvent[] {
-  if (message.length <= 1024) return [];
-  return [{ type: "data", category: "data", data: truncate(message, 200), priority: 4 }];
+  if (message.length <= 300) return [];
+  // P3 (not P4): messages over 300 chars contain domain-specific vocabulary
+  // (function names, schema terms, error details) that anchors context. At P4
+  // they were evicted first, losing the user's problem domain while keeping
+  // structural metadata. Threshold lowered from 1024: real conversations are
+  // typically 300-800 chars, not >1024 — the old threshold captured almost nothing.
+  //
+  // Key terms are prepended so FTS5 can find distinctive vocabulary that appears
+  // anywhere in the message, even beyond the 300-char truncation boundary.
+  const terms = extractKeyTerms(message);
+  const prefix = terms.length > 0 ? `[${terms.join(" ")}] ` : "";
+  return [{ type: "data", category: "data", data: truncate(prefix + message, 300), priority: 3 }];
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

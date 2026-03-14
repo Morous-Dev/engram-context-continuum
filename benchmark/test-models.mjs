@@ -22,11 +22,18 @@
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { getBenchmarkModelsDir } from './models-dir.mjs';
 
-const MODELS_DIR = join(homedir(), '.engram-cc', 'models');
+const MODELS_DIR = (() => {
+  try {
+    return getBenchmarkModelsDir();
+  } catch (error) {
+    console.error(`\n  ${error.message}`);
+    process.exit(1);
+  }
+})();
 const THIS_FILE  = fileURLToPath(import.meta.url);
 
 // ── Models to test ────────────────────────────────────────────────────────────
@@ -50,18 +57,18 @@ const MODELS = [
     noThink:   true,
   },
   {
-    id:        'qwen3.5-2b',
-    label:     'Qwen 3.5 2B   (tier3b, candidate)',
-    file:      'qwen3.5-2b-q5_k_m.gguf',
+    id:        'qwen3.5-4b',
+    label:     'Qwen 3.5 4B   (tier3b, candidate)',
+    file:      'Qwen3.5-4B-Q4_K_M.gguf',
     incumbent: false,
-    // Qwen 3.5 2B has thinking mode — /no_think disables it for direct output.
+    // Qwen 3.5 4B has thinking mode — /no_think disables it for direct output.
     // GPU-then-CPU fallback is handled inside tier3b.ts; the test uses the
     // same prompt as production.
     noThink:   true,
     // node-llama-cpp's VRAM estimator over-estimates KV cache for Qwen 3.5's
     // hybrid DeltaNet/GQA architecture, causing false rejection at ≥1024 ctx
     // on RTX 5060 Ti (Blackwell SM_120). ignoreMemorySafetyChecks bypasses the
-    // estimator; actual allocation succeeds at 4096 ctx (~2.5 GB VRAM used).
+    // estimator; actual allocation succeeds at 4096 ctx.
     ignoreMemorySafetyChecks: true,
   },
 ];
@@ -230,7 +237,7 @@ async function runSingleModel(modelId) {
 
   // Attempt 1: GPU inference
   // ignoreMemorySafetyChecks bypasses the VRAM estimator for models (e.g. Qwen
-  // 3.5 2B) whose architecture causes the estimator to wildly over-estimate.
+  // Qwen 3.5 4B) whose architecture causes the estimator to over-estimate.
   const ctxOpts = { contextSize: 4096, ...(modelDef.ignoreMemorySafetyChecks ? { ignoreMemorySafetyChecks: true } : {}) };
   try {
     llama   = await llamaCpp.getLlama();

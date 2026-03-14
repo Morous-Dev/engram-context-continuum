@@ -1,9 +1,9 @@
 /**
  * opencode.ts — EngramCC adapter for OpenCode.
  *
- * What this file is: registers EngramCC hooks and MCP server with OpenCode.
- * Responsible for: writing hook entries to ~/.config/opencode/config.json (or
- *   ~/.opencode/config.json) and the MCP server entry to the same file.
+ * What this file is: generates project-local OpenCode setup snippets.
+ * Responsible for: writing hook and MCP examples under
+ *   <projectDir>/.engram-cc/assistant-configs/opencode/.
  *   OpenCode uses camelCase event names and a JSON config format.
  *   Event name mapping:
  *     afterToolUse   → posttooluse.mjs   (fires after every tool call)
@@ -11,129 +11,76 @@
  *     sessionStart   → sessionstart.mjs  (fires when session begins)
  *     sessionEnd     → stop.ts           (fires when session ends)
  *
- * Config file: ~/.config/opencode/config.json  (preferred)
- *              ~/.opencode/config.json          (fallback)
- *
- * Depends on: node:fs, node:path, node:os, src/adapters/detect.ts.
+ * Depends on: src/adapters/detect.ts, src/adapters/local-config.ts.
  * Depended on by: src/adapters/index.ts.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { isOpenCodeInstalled } from "./detect.js";
 import type { AssistantAdapter, RegistrationResult } from "./types.js";
+import { withAssistantEnv } from "./types.js";
+import {
+  getBuildHooksDir,
+  getMcpServerPath,
+  getSrcHooksDir,
+  writeLocalAdapterArtifact,
+} from "./local-config.js";
 
 const MARKER = "engram-cc";
 
-/**
- * Resolve the OpenCode config directory.
- * Prefers ~/.config/opencode (XDG), falls back to ~/.opencode.
- * Creates the preferred location if neither exists.
- */
-function getOpenCodeDir(): string {
-  const xdg = join(homedir(), ".config", "opencode");
-  const fallback = join(homedir(), ".opencode");
-  if (existsSync(xdg)) return xdg;
-  if (existsSync(fallback)) return fallback;
-  return xdg; // default to XDG; mkdirSync will create it
-}
-
-interface OpenCodeHookEntry {
-  type: string;
-  command: string;
-}
-
-interface OpenCodeConfig {
-  hooks?: Record<string, OpenCodeHookEntry[]>;
-  mcp?: Record<string, { command: string; args?: string[] }>;
-  [key: string]: unknown;
-}
-
-function readJson<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback;
-  try { return JSON.parse(readFileSync(path, "utf-8")) as T; }
-  catch { return fallback; }
-}
-
-function writeJson(path: string, data: unknown): void {
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
-}
-
 export class OpenCodeAdapter implements AssistantAdapter {
   readonly name = "OpenCode";
+  readonly capabilities = {
+    session_start: "native",
+    user_prompt_submit: "native",
+    post_tool_use: "native",
+    pre_compact: "native",
+    stop: "native",
+  } as const;
 
   isInstalled(): boolean {
     return isOpenCodeInstalled();
   }
 
   /**
-   * Register hooks in OpenCode's config.json.
-   * OpenCode uses camelCase event names with a JSON array format.
-   * Idempotent — checked via MARKER string in command.
+   * Emit a project-local OpenCode hook snippet.
    */
-  registerHooks(packageRoot: string): RegistrationResult {
-    try {
-      const dir = getOpenCodeDir();
-      mkdirSync(dir, { recursive: true });
-      const configPath = join(dir, "config.json");
-      const config = readJson<OpenCodeConfig>(configPath, {});
-      if (!config.hooks) config.hooks = {};
+  registerHooks(packageRoot: string, projectRoot: string): RegistrationResult {
+    const hooksDir = getSrcHooksDir(packageRoot);
+    const buildDir = getBuildHooksDir(packageRoot);
+    const config = {
+      hooks: {
+        afterToolUse: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/posttooluse.mjs" --marker=${MARKER}`, "opencode") }],
+        beforeCompress: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/precompact.mjs" --marker=${MARKER}`, "opencode") }],
+        sessionStart: [{ type: "command", command: withAssistantEnv(`node "${hooksDir}/sessionstart.mjs" --marker=${MARKER}`, "opencode") }],
+        sessionEnd: [{ type: "command", command: withAssistantEnv(`node "${buildDir}/stop.js" --marker=${MARKER}`, "opencode") }],
+      },
+    };
 
-      const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
-      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
-      const hookDefs: Array<[string, string]> = [
-        ["afterToolUse",   `node "${hooksDir}/posttooluse.mjs"`],
-        ["beforeCompress", `node "${hooksDir}/precompact.mjs"`],
-        ["sessionStart",   `node "${hooksDir}/sessionstart.mjs"`],
-        ["sessionEnd",     `node "${buildDir}/stop.js"`],
-      ];
-
-      let registered = 0;
-      for (const [event, command] of hookDefs) {
-        if (!config.hooks[event]) config.hooks[event] = [];
-        const already = config.hooks[event].some(h => h.command?.includes(MARKER));
-        if (!already) {
-          config.hooks[event].push({ type: "command", command });
-          registered++;
-        }
-      }
-
-      writeJson(configPath, config);
-      return {
-        success: true,
-        skipped: registered === 0,
-        message: registered > 0
-          ? `Registered ${registered} hooks in ${configPath}`
-          : `Hooks already registered in ${configPath}`,
-      };
-    } catch (err) {
-      return { success: false, skipped: false, message: `Failed: ${String(err)}` };
-    }
+    return writeLocalAdapterArtifact(
+      projectRoot,
+      "opencode",
+      "config.hooks.json",
+      "OpenCode hook snippet",
+      JSON.stringify(config, null, 2),
+    );
   }
 
   /**
-   * Register the MCP server in OpenCode's config.json.
-   * OpenCode uses an inline `mcp` key in config.json (not a separate file).
+   * Emit a project-local OpenCode MCP snippet.
    */
-  registerMcp(packageRoot: string): RegistrationResult {
-    try {
-      const dir = getOpenCodeDir();
-      mkdirSync(dir, { recursive: true });
-      const configPath = join(dir, "config.json");
-      const config = readJson<OpenCodeConfig>(configPath, {});
-      if (!config.mcp) config.mcp = {};
+  registerMcp(packageRoot: string, projectRoot: string): RegistrationResult {
+    const config = {
+      mcp: {
+        [MARKER]: { command: "node", args: [getMcpServerPath(packageRoot)] },
+      },
+    };
 
-      if (config.mcp[MARKER]) {
-        return { success: true, skipped: true, message: `MCP already registered in ${configPath}` };
-      }
-
-      const serverPath = join(packageRoot, "build", "mcp", "server.js").replace(/\\/g, "/");
-      config.mcp[MARKER] = { command: "node", args: [serverPath] };
-      writeJson(configPath, config);
-      return { success: true, skipped: false, message: `MCP server registered in ${configPath}` };
-    } catch (err) {
-      return { success: false, skipped: false, message: `Failed: ${String(err)}` };
-    }
+    return writeLocalAdapterArtifact(
+      projectRoot,
+      "opencode",
+      "config.mcp.json",
+      "OpenCode MCP snippet",
+      JSON.stringify(config, null, 2),
+    );
   }
 }

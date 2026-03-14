@@ -28,10 +28,12 @@ import type { CompressionTier } from "./types.js";
  * Hardware profile: capability tier based on GPU VRAM or unified memory.
  *
  * minimal  — no discrete GPU or VRAM < 4 GB. Single-model sequential pipeline.
- * standard — VRAM 4–11 GB or high-RAM machine. Sequential pipeline, GPU-assisted.
- * power    — VRAM ≥ 12 GB or Apple Silicon ≥ 16 GB. Parallel pipeline unlocked.
+ * standard — VRAM 4–11 GB or high-RAM x86 machine. Sequential pipeline, GPU-assisted.
+ * power    — VRAM 12–23 GB or Apple Silicon ≥ 16 GB. Parallel pipeline unlocked.
+ * extreme  — VRAM ≥ 24 GB (RTX 4090, A100, H100) or Apple Silicon ≥ 36 GB.
+ *            Maximum-quality embedding specialist model. Parallel pipeline unlocked.
  */
-export type HardwareProfile = "minimal" | "standard" | "power";
+export type HardwareProfile = "minimal" | "standard" | "power" | "extreme";
 
 // ── VRAM detection ────────────────────────────────────────────────────────────
 
@@ -159,11 +161,14 @@ function trySpawn(command: string, args: string[]): string | null {
  * Detect the hardware capability profile for this machine.
  *
  * Profile thresholds:
- *   power:    VRAM ≥ 12 GB (RTX 3090/4090, A100, etc.)
- *             OR Apple Silicon with ≥ 16 GB unified RAM
- *   standard: VRAM 4–11 GB (RTX 3060/3070/4060/4070, etc.)
- *             OR x86 machine with ≥ 16 GB RAM and no discrete GPU
- *   minimal:  everything else
+ *   extreme:  VRAM ≥ 24 GB (RTX 4090, A100, H100) or Apple Silicon ≥ 36 GB.
+ *             Maximum-quality embedding model (BGE-large 768-dim).
+ *   power:    VRAM 12–23 GB (RTX 3060 12 GB, 3090, 4080) or Apple Silicon ≥ 16 GB.
+ *             High-quality embedding model (BGE-large 768-dim). Parallel pipeline.
+ *   standard: VRAM 4–11 GB (RTX 3060 8 GB, 4060, etc.)
+ *             OR x86 machine with ≥ 16 GB RAM and no discrete GPU.
+ *             Mid-quality embedding model (BGE-base 768-dim).
+ *   minimal:  everything else — small ONNX model (MiniLM 384-dim), sequential.
  *
  * @returns HardwareProfile for this machine.
  */
@@ -171,22 +176,24 @@ export function detectHardwareProfile(): HardwareProfile {
   const ramGB = Math.floor(totalmem() / 1_073_741_824);
   const vramGB = detectVramGB();
 
-  // Apple Silicon: unified memory ≥ 16 GB qualifies as power
+  // Apple Silicon: unified memory serves as both CPU and GPU VRAM
   if (process.platform === "darwin" && process.arch === "arm64") {
+    if (vramGB >= 36) return "extreme"; // M3 Ultra, M2 Ultra
     if (vramGB >= 16) return "power";
     if (vramGB >= 8)  return "standard";
     return "minimal";
   }
 
-  // Discrete GPU path (NVIDIA detected via nvidia-smi)
+  // Discrete GPU path (NVIDIA/AMD detected via nvidia-smi / rocm-smi / wmic)
   if (vramGB > 0) {
-    if (vramGB >= 12) return "power";
+    if (vramGB >= 24) return "extreme"; // RTX 4090, A100, H100
+    if (vramGB >= 12) return "power";   // RTX 3060 12 GB, 3090, 4080
     if (vramGB >= 4)  return "standard";
     return "minimal";
   }
 
   // No discrete GPU — fall back to system RAM as a proxy
-  // High-RAM machines (≥ 16 GB) can run large models via CPU inference
+  // High-RAM machines (≥ 16 GB) can run large ONNX models via CPU inference
   if (ramGB >= 16) return "standard";
   return "minimal";
 }

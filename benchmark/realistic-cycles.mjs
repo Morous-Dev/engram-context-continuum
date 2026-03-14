@@ -744,7 +744,324 @@ export function cycle16() {
  * All 16 cycle generators, indexed 0-15.
  * Each returns an array of 30-80 events representing one compaction cycle.
  */
+// Cycle 17: CHAOS — sudden domain pivot + code dump + brutal stack trace
+// Tests whether ECC survives a hard topic switch with no warning.
+// The user abandons the e-commerce project mid-session and pivots to an
+// IoT sensor pipeline — completely different domain, file paths, and decisions.
+// Also includes a 300-char code paste and a brutal multi-line stack trace.
+export function cycleChaos() {
+  const codeDump = [
+    "import { KafkaClient, Producer } from 'kafka-node';",
+    "const client = new KafkaClient({ kafkaHost: process.env.KAFKA_BROKER });",
+    "const producer = new Producer(client);",
+    "export async function emitSensorReading(deviceId: string, payload: SensorPayload) {",
+    "  return new Promise((res, rej) => producer.send([{ topic: 'sensor.readings', messages: JSON.stringify({ deviceId, payload, ts: Date.now() }) }], (e, d) => e ? rej(e) : res(d)));",
+    "}",
+  ].join(" ").slice(0, 500);
+
+  const stackTrace = [
+    "Error: ECONNREFUSED 127.0.0.1:9092",
+    "  at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1494:16)",
+    "  at KafkaClient._connectToBroker (/node_modules/kafka-node/lib/kafkaClient.js:322:14)",
+    "  at KafkaClient.connect (/node_modules/kafka-node/lib/kafkaClient.js:98:8)",
+    "Caused by: No Kafka broker reachable. Is Docker running? docker ps shows kafka container as Exited (1).",
+  ].join(" | ").slice(0, 500);
+
+  return [
+    ev.prompt("PIVOT: Forget the e-commerce app for now. The client wants a real-time IoT sensor pipeline first. Complete domain change. Starting fresh architecture."),
+    plan("enter", "IoT sensor pipeline architecture: Kafka vs MQTT vs direct WebSocket ingestion"),
+    ev.decision("PIVOT DECISION: Abandoning e-commerce sprint. New project: IoT sensor data pipeline. Node.js ingestion service, Kafka message bus, TimescaleDB for time-series storage, Grafana for dashboards"),
+    ev.decision("Message bus: Kafka over MQTT — Kafka gives replay, partitioning, and consumer groups. MQTT is fire-and-forget. Sensor data must be replayable for ML training"),
+    ev.decision("Time-series DB: TimescaleDB (PostgreSQL extension) over InfluxDB — team already knows PostgreSQL, Prisma has limited InfluxDB support, TimescaleDB has hypertables and continuous aggregates"),
+    ev.decision("Redis role changes: no longer just caching — now used for pub/sub fan-out to WebSocket clients showing live sensor dashboards. Upstash Redis remains the provider"),
+    cwd("/home/user/projects/iot-pipeline"),
+    env("mkdir -p iot-pipeline && cd iot-pipeline && npm init -y"),
+    env("npm install kafka-node timescaledb pg @prisma/client zod"),
+    ev.fileWrite("src/ingestion/kafka-producer.ts"),
+    ev.prompt("Here is the Kafka producer code I have so far — review it: " + codeDump),
+    ev.fileWrite("src/ingestion/kafka-producer.ts"),
+    ev.fileWrite("src/ingestion/sensor-validator.ts"),
+    ev.fileWrite("src/storage/timescale-client.ts"),
+    ev.fileWrite("prisma/schema.prisma"),
+    ev.fileWrite("docker-compose.yml"),
+    env("docker compose up -d kafka zookeeper timescaledb"),
+    ev.error(stackTrace),
+    env("docker ps"),
+    ev.error("Error: kafka container Exited (1) — port 9092 already in use by a ghost process from previous session"),
+    env("kill $(lsof -t -i:9092) && docker compose up -d kafka"),
+    ev.resolved("Kafka port conflict resolved — killed ghost process, broker now reachable on 9092"),
+    ev.fileEdit("src/ingestion/kafka-producer.ts"),
+    ev.fileWrite("src/ingestion/kafka-consumer.ts"),
+    ev.fileWrite("src/api/sensor-readings.ts"),
+    ev.fileWrite("src/api/device-registry.ts"),
+    ev.fileEdit("prisma/schema.prisma"),
+    ev.tool("npx prisma migrate dev --name init-timescale — Created sensor_readings hypertable, devices table"),
+    ev.fileWrite("src/storage/hypertable-setup.ts"),
+    subagent("Research TimescaleDB continuous aggregates for 1-min, 5-min, 1-hour rollups on sensor data", "completed"),
+    ev.decision("Aggregation: TimescaleDB continuous aggregates for 1m/5m/1h rollups — computed automatically on insert, no cron jobs needed"),
+    ev.fileWrite("src/storage/aggregates.ts"),
+    ev.error("Error: TimescaleDB continuous aggregate refresh policy requires a minimum bucket_width of 1 minute — raw sub-second data cannot be aggregated below that"),
+    ev.resolved("Aggregate floor resolved — raw readings stored in sensor_readings at full resolution, aggregates start at 1m. Sub-second queries hit raw table directly"),
+    git("add"),
+    git("commit"),
+    git("push"),
+    ev.task("Wire Kafka consumer to TimescaleDB writer — end-to-end ingestion test with simulated device"),
+    ev.task("Add device authentication — each IoT device needs an API key for the ingestion endpoint"),
+    ev.prompt("Pipeline skeleton is up. Kafka → consumer → TimescaleDB write path needs wiring. Auth is next after that."),
+  ];
+}
+
+// ── Chaos cycles ───────────────────────────────────────────────────────────────
+// These cycles deliberately stress ECC's failure modes:
+//   cycle18 — massive code paste (FTS5 noise + snapshot budget pressure)
+//   cycle19 — brutal stack trace flood with anchor-keyword contamination
+//   cycle20 — simultaneous parallel workstreams (auth + payments + DevOps)
+//   cycle21 — rapid-fire identical tool calls (dedup window stress)
+
+// Cycle 18: CODE DUMP — user pastes 3 large code files and a full schema mid-session.
+// The pasted code contains anchor-fact keywords (postgresql, redis, jwt, prisma)
+// in technical contexts that have nothing to do with the original decisions.
+// Tests: does FTS5 return false positives? Does the snapshot budget survive large data?
+export function cycleChaosCodeDump() {
+  // ~480-char TypeScript snippet containing anchor keywords as code identifiers —
+  // NOT decisions. FTS5 will index these, potentially polluting search results.
+  const authServiceCode = [
+    "// legacy auth service — being replaced, DO NOT use JWT here",
+    "import { createClient } from 'redis'; // redis client for session fallback only",
+    "import { PrismaClient } from '@prisma/client'; // prisma types for user lookup",
+    "const pool = new Pool({ connectionString: process.env.POSTGRESQL_URL }); // raw pg for perf",
+    "export async function validateToken(token: string): Promise<User | null> {",
+    "  const cached = await redis.get(`session:${token}`);",
+    "  if (cached) return JSON.parse(cached);",
+    "  const user = await pool.query('SELECT * FROM users WHERE token=$1', [token]);",
+    "  return user.rows[0] ?? null;",
+    "}",
+  ].join(" ").slice(0, 500);
+
+  const paymentCode = [
+    "// stripe webhook handler — processes payment.succeeded events",
+    "export async function handleStripeWebhook(req: Request, res: Response) {",
+    "  const sig = req.headers['stripe-signature'] as string;",
+    "  const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);",
+    "  if (event.type === 'payment_intent.succeeded') {",
+    "    await prisma.order.update({ where: { stripePaymentIntentId: event.data.object.id }, data: { status: 'paid' } });",
+    "    await redis.del(`cart:${event.data.object.metadata.userId}`);",
+    "  }",
+    "  res.json({ received: true });",
+    "}",
+  ].join(" ").slice(0, 500);
+
+  const schemaCode = [
+    "model SensorReading { id String @id @default(uuid()) deviceId String device Device @relation",
+    "fields: [deviceId] references: [id] value Float unit String timestamp DateTime @default(now())",
+    "metadata Json? @@index([deviceId, timestamp]) @@map('sensor_readings') }",
+    "model Device { id String @id @default(uuid()) apiKey String @unique name String",
+    "readings SensorReading[] createdAt DateTime @default(now()) @@map('devices') }",
+  ].join(" ").slice(0, 400);
+
+  return [
+    ev.prompt("Here is the legacy auth service code I need you to review and refactor: " + authServiceCode),
+    ev.prompt("And here is the Stripe webhook handler — it has a bug with the cart invalidation: " + paymentCode),
+    ev.prompt("New Prisma schema for the IoT models — does this look right? " + schemaCode),
+    ev.fileRead("src/auth/legacy-auth.ts"),
+    ev.fileRead("src/payments/stripe-webhook.ts"),
+    ev.fileRead("prisma/schema.prisma"),
+    ev.decision("Legacy auth service to be replaced with the JWT middleware already built in cycle 2 — no new auth pattern"),
+    ev.error("Error in stripe-webhook.ts line 8: redis.del called without await — fire-and-forget cart invalidation may leave stale cart data after payment"),
+    ev.fileEdit("src/payments/stripe-webhook.ts"),
+    ev.resolved("Stripe webhook fix — added await to redis.del, cart invalidation now atomic with order status update"),
+    ev.fileWrite("src/payments/stripe-webhook.test.ts"),
+    ev.tool("npm run test -- payments: 5/5 passed"),
+    ev.fileEdit("src/auth/legacy-auth.ts"),
+    ev.fileWrite("src/auth/legacy-auth.deprecated.ts"),
+    ev.decision("Legacy auth service deprecated — marked with @deprecated JSDoc, will be removed after all consumers migrate to JWT middleware"),
+    ev.fileEdit("src/middleware/auth.ts"),
+    ev.fileEdit("src/routes/users.ts"),
+    ev.fileEdit("src/routes/products.ts"),
+    subagent("Find all callers of legacyValidateToken() across the codebase", "completed"),
+    ev.fileEdit("src/routes/admin/tenants.ts"),
+    ev.fileEdit("src/routes/admin/analytics.ts"),
+    ev.tool("npm run typecheck -- 0 errors"),
+    git("add"),
+    git("commit"),
+    git("push"),
+    ev.task("Remove legacy-auth.ts after 1 sprint grace period — all callers migrated"),
+    ev.prompt("Code review done. Legacy auth deprecated, Stripe webhook fixed. Both are clean now."),
+  ];
+}
+
+// Cycle 19: STACK TRACE FLOOD — production incident simulation.
+// 12 consecutive errors hit in rapid succession. Each error contains anchor-fact
+// keywords (postgresql, redis, jwt, prisma, websocket) in technical stack trace
+// context — NOT real decisions. This is the FTS5 keyword contamination test.
+// Tests: MAX_ERRORS cap (10), snapshot budget under error flood, FTS5 signal vs noise.
+export function cycleChaosStackTrace() {
+  const pgStackTrace = [
+    "Error: Connection pool exhausted after 30s. Pool: postgresql://prod-db.us-east-1.rds.amazonaws.com:5432/shopwave_prod",
+    "  at Pool.connect (node_modules/pg-pool/index.js:198:11)",
+    "  at PrismaClient._executeRequest (/app/node_modules/@prisma/client/runtime/library.js:128:42)",
+    "  at OrderService.createOrder (/app/src/services/order.service.ts:67:18)",
+    "  at async OrderController.post (/app/src/controllers/order.controller.ts:23:5)",
+    "Active connections: 100/100. Waiting: 47. Timeout: 30000ms. Last successful query: 2026-03-12T19:44:02Z",
+  ].join(" | ").slice(0, 500);
+
+  const redisStackTrace = [
+    "Error: Redis ECONNRESET — connection to upstash-global.upstash.io:6379 lost mid-command SETEX session:usr_8f2a1b 900",
+    "  at Socket.onclose (node_modules/ioredis/built/redis/event_handler.js:183:14)",
+    "  at Socket.emit (node:events:517:28)",
+    "Retry attempt 3/3 failed. Falling back to in-memory session store — WARNING: sessions will not persist across restarts",
+    "Affected users: ~1,400 active sessions. Incident start: 2026-03-12T19:44:15Z",
+  ].join(" | ").slice(0, 500);
+
+  const jwtStackTrace = [
+    "JsonWebTokenError: invalid signature at /app/src/auth/jwt.ts:42:15",
+    "  at Object.verify (node_modules/jsonwebtoken/verify.js:89:21)",
+    "  at AuthMiddleware.validate (/app/src/auth/middleware.ts:31:18)",
+    "Token header: {alg:'RS256',typ:'JWT'}. Expected alg: HS256. Root cause: JWT_SECRET rotated in prod but old tokens still in circulation. Affected endpoints: all /api/v1/* routes. 403 rate: 94%",
+  ].join(" | ").slice(0, 500);
+
+  const wsStackTrace = [
+    "Error: WebSocket server memory usage 4.1GB / 4GB limit — OOM imminent",
+    "  at Server.handleUpgrade (node:http:1823:14) process.memoryUsage(): rss=4294MB heapUsed=3891MB",
+    "Active WebSocket connections: 12,847. Connections without ping response (likely leaked): 9,203",
+    "Root cause: WebSocket leak from cycle 4 — connections not cleaned up on client disconnect. This is the SAME bug that was 'fixed' in cycle 7 and reappeared in cycle 10. Still unresolved.",
+  ].join(" | ").slice(0, 500);
+
+  return [
+    ev.prompt("PRODUCTION IS DOWN. Multiple services failing simultaneously. Investigating."),
+    ev.error(pgStackTrace),
+    ev.error(redisStackTrace),
+    ev.error(jwtStackTrace),
+    ev.error(wsStackTrace),
+    ev.error("Error: Prisma query P2024 timed out after 15000ms — SELECT COUNT(*) FROM orders WHERE created_at > NOW() - INTERVAL '1 hour' on table with 48M rows, no index on created_at"),
+    ev.error("Error: stripe.webhooks.constructEvent failed — webhook signature mismatch. Unprocessed payment events: 847. Revenue at risk: ~$127,000"),
+    ev.error("Error: CORS preflight rejected for https://app.shopwave.com — Access-Control-Allow-Origin header missing on /api/v1/products after nginx config deploy"),
+    ev.error("Error: Cloudflare R2 GetObject timeout after 30s for key=products/images/uuid-8f2a.webp — R2 bucket in eu-west region, user in ap-southeast. No CDN edge caching configured"),
+    ev.error("Error: TimescaleDB chunk compression job failed — disk 97% full on /dev/sda1 (500GB). Uncompressed chunks older than 7 days: 214GB"),
+    ev.error("Error: JWT refresh token rotation race condition — two concurrent requests with same refresh token both succeeded, creating duplicate sessions for user_id=usr_4492a1"),
+    ev.error("Error: node out of memory — JavaScript heap out of memory. FATAL ERROR: Reached heap limit Allocation failed. --max-old-space-size=4096"),
+    ev.error("Error: Kafka consumer group lag 2.4M messages — consumer processing 340 msg/s, producer emitting 12,000 msg/s. IoT pipeline falling behind real-time by 118 minutes"),
+    ev.fileRead("src/db/prisma-client.ts"),
+    ev.decision("INCIDENT RESPONSE: Scale DB connection pool to 200, add missing index on orders.created_at, rotate JWT secret with 30min overlap window, restart WebSocket server to clear leaked connections"),
+    ev.fileEdit("src/db/prisma-client.ts"),
+    ev.fileEdit("src/auth/jwt.ts"),
+    ev.tool("npx prisma migrate dev --name add-orders-created-at-index"),
+    ev.fileEdit("src/server.ts"),
+    env("kubectl rollout restart deployment/api-server"),
+    git("add"),
+    git("commit"),
+    ev.task("Post-incident: add APM alerting for connection pool saturation, WebSocket connection count, and heap usage"),
+    ev.task("Post-incident: fix WebSocket leak permanently — this is the third time it has caused an outage"),
+    ev.prompt("Services recovering. DB pool scaled, JWT rotated with overlap, WebSocket server restarted. Monitoring."),
+  ];
+}
+
+// Cycle 20: MIXED TOPICS — three simultaneous workstreams with no clean separation.
+// Auth bug fix + payment module refactor + DevOps migration all in one session.
+// File edits jump between domains unpredictably. Decisions from multiple contexts.
+// Tests: does active_files capture the right recent files? Does the decision section
+// stay coherent when decisions span 3 unrelated problem spaces?
+export function cycleChaosMixedTopics() {
+  return [
+    ev.prompt("Three things need to happen today in parallel: auth bug, payment refactor, and we need to migrate from Heroku to Railway before end of month."),
+    ev.fileRead("src/auth/refresh.ts"),
+    ev.error("Error: refresh token not being invalidated on password reset — user who resets password can still use old refresh token for 7 days"),
+    ev.fileEdit("src/auth/refresh.ts"),
+    ev.fileEdit("src/auth/passwords.ts"),
+    ev.fileWrite("src/auth/refresh.test.ts"),
+    ev.fileRead("src/payments/stripe.ts"),
+    ev.decision("Payment refactor: split stripe.ts (1 file, 847 lines) into stripe-checkout.ts, stripe-webhooks.ts, stripe-subscriptions.ts — file exceeds maintainability threshold"),
+    ev.fileWrite("src/payments/stripe-checkout.ts"),
+    ev.fileWrite("src/payments/stripe-webhooks.ts"),
+    ev.fileWrite("src/payments/stripe-subscriptions.ts"),
+    ev.fileRead("src/auth/refresh.ts"),
+    ev.tool("npm run test -- auth: refresh token invalidated on password reset: PASSED"),
+    ev.resolved("Auth security fix — refresh tokens now invalidated on password reset. Entire token family revoked, not just the specific token"),
+    ev.fileRead("railway.toml"),
+    ev.decision("Infrastructure: migrate from Heroku to Railway — Railway supports Nixpacks, has PostgreSQL add-ons, $20/mo vs $250/mo on Heroku. No vendor lock-in on Railway"),
+    ev.fileWrite("railway.toml"),
+    ev.fileWrite(".env.railway"),
+    env("railway login && railway link"),
+    ev.fileEdit("src/db/prisma-client.ts"),
+    ev.fileRead("src/payments/stripe.ts"),
+    ev.fileEdit("src/payments/stripe-checkout.ts"),
+    ev.error("Error: stripe-subscriptions.ts import of deprecated stripe.ts createPaymentIntent — circular import after split"),
+    ev.fileEdit("src/payments/stripe-subscriptions.ts"),
+    ev.fileEdit("src/payments/stripe-checkout.ts"),
+    ev.resolved("Circular import resolved — createPaymentIntent moved to stripe-core.ts, imported by both checkout and subscriptions"),
+    ev.fileWrite("src/payments/stripe-core.ts"),
+    subagent("Verify Railway environment variables match Heroku config vars — check for missing secrets", "completed"),
+    ev.fileEdit(".env.railway"),
+    ev.tool("railway up --detach — Deploy #1: FAILED — missing DATABASE_URL"),
+    ev.fileEdit(".env.railway"),
+    ev.tool("railway up --detach — Deploy #2: FAILED — missing STRIPE_SECRET_KEY"),
+    ev.fileEdit(".env.railway"),
+    ev.tool("railway up --detach — Deploy #3: SUCCESS — https://shopwave-production.up.railway.app"),
+    ev.decision("Railway migration complete — DNS cutover scheduled for next maintenance window. Heroku dynos kept warm for 72h rollback window"),
+    git("add"),
+    git("commit"),
+    git("push"),
+    ev.task("DNS cutover from Heroku to Railway — requires 15min maintenance window"),
+    ev.task("Decommission Heroku after 72h observation period"),
+    ev.task("Delete stripe.ts after all callers migrated to split files"),
+    ev.prompt("All three: auth fix shipped, payments split, Railway deployed. Long day. Monitoring Railway metrics."),
+  ];
+}
+
+// Cycle 21: RAPID-FIRE DEDUP — same tool call hammered 8 times in a row.
+// DEDUP_WINDOW=5 means the first 5 identical events are blocked, but the 6th
+// (which arrives after 5+ other events) sneaks through. This tests whether
+// the snapshot and FTS5 stay clean under rapid retry storms.
+// Tests: dedup window boundary, snapshot stability under identical events.
+export function cycleChaosRapidFire() {
+  const testCmd = "npm run test -- --watchAll=false";
+  const buildCmd = "npm run build";
+
+  return [
+    ev.prompt("Tests are flaky. Running them 8 times to identify the intermittent failure pattern."),
+    // Hammer the same test command — first 5 are deduped, subsequent ones may slip through
+    ev.tool(`${testCmd} — attempt 1: PASSED (2847ms)`),
+    ev.tool(`${testCmd} — attempt 2: FAILED auth.test.ts:Line 47 — timeout 5000ms exceeded`),
+    ev.tool(`${testCmd} — attempt 3: PASSED (3102ms)`),
+    ev.tool(`${testCmd} — attempt 4: FAILED same timeout`),
+    ev.tool(`${testCmd} — attempt 5: PASSED (2991ms)`),
+    ev.error(`Flaky test: auth.test.ts line 47 — "should refresh token within 5s" fails intermittently. Timing-dependent. DEDUP NOTE: this exact error may appear multiple times in the event store.`),
+    ev.tool(`${testCmd} — attempt 6: PASSED (2788ms)`),
+    ev.tool(`${testCmd} — attempt 7: FAILED again`),
+    ev.tool(`${testCmd} — attempt 8: PASSED`),
+    ev.fileRead("src/auth/refresh.test.ts"),
+    ev.decision("Flaky test root cause: test sets 5000ms timeout but the actual bcrypt hash in the test fixture takes 4800ms on CI (slower than local). Fix: pre-hash fixture password or increase timeout to 10000ms"),
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    // Now hammer the build command
+    ev.tool(`${buildCmd} — run 1: SUCCESS`),
+    ev.tool(`${buildCmd} — run 2: SUCCESS`),
+    ev.tool(`${buildCmd} — run 3: SUCCESS`),
+    ev.tool(`${buildCmd} — run 4: SUCCESS`),
+    ev.tool(`${buildCmd} — run 5: SUCCESS`),
+    ev.tool(`${buildCmd} — run 6: SUCCESS`),
+    // Rapid file edits of the same file to test file-level dedup
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    ev.fileEdit("src/auth/refresh.test.ts"),
+    ev.tool(`${testCmd} — FINAL: PASSED (2841ms) — 10/10 auth tests stable`),
+    ev.resolved("Flaky test resolved — bcrypt fixture pre-hashed at test suite setup, timing dependency eliminated. Test now stable across 8 consecutive runs"),
+    ev.fileRead("src/auth/refresh.test.ts"),
+    subagent("Audit all test files for similar timing-dependent assertions", "completed"),
+    ev.fileEdit("src/routes/auth.test.ts"),
+    ev.fileEdit("src/payments/stripe-checkout.test.ts"),
+    git("add"),
+    git("commit"),
+    git("push"),
+    ev.task("Add CI flakiness detection — fail build if same test fails in >2 of last 10 runs"),
+    ev.prompt("Tests stable. Flaky bcrypt timing issue fixed. CI should be clean now."),
+  ];
+}
+
 export const REAL_CYCLES = [
   cycle1, cycle2, cycle3, cycle4, cycle5, cycle6, cycle7, cycle8,
   cycle9, cycle10, cycle11, cycle12, cycle13, cycle14, cycle15, cycle16,
+  cycleChaos, cycleChaosCodeDump, cycleChaosStackTrace,
+  cycleChaosMixedTopics, cycleChaosRapidFire,
 ];

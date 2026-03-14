@@ -33,7 +33,7 @@
 
 import { join } from "node:path";
 import { mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { seed } from "./seed-helpers.mjs";
 import { generateCycleEvents, estimateTokens } from "./marathon-data.mjs";
@@ -156,16 +156,21 @@ for (const level of COMPACTION_LEVELS) {
       compactCount: cycle,
     });
     lastSnapshot = snapshot;
+    const resumeChain = db.getResumeChain(sessionId);
 
     // Generate SLM brief (may be null if no SLM available)
     let slmBrief = null;
+    let structuredHandoff = null;
     if (generateCompactBrief) {
       try {
-        slmBrief = await generateCompactBrief(cleanedEvents, {
+        const result = await generateCompactBrief(cleanedEvents, {
           compactCount: cycle,
           sessionId,
           projectDir,
+          resumeChain,
         });
+        slmBrief = result.brief;
+        structuredHandoff = result.structured ? JSON.stringify(result.structured) : null;
       } catch {
         // SLM not available — that's fine, we'll measure raw baseline
       }
@@ -178,6 +183,7 @@ for (const level of COMPACTION_LEVELS) {
     lastRawDirective = buildSessionDirective("compact", eventMeta);
 
     db.upsertResume(sessionId, snapshot, events.length, slmBrief);
+    db.appendResumeHistory(sessionId, cycle, snapshot, slmBrief, structuredHandoff, events.length);
     db.incrementCompactCount(sessionId);
   }
 

@@ -22,6 +22,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { TranscriptContext } from "./dedup.js";
 import type { StoredEvent, ResumeHistoryRow } from "../session/db.js";
+import type { StructuredHandoff } from "../compression/types.js";
 import type { WorkingMemory } from "../memory/working.js";
 import { truncateString } from "../truncate.js";
 
@@ -70,7 +71,32 @@ export interface HandoffData {
   blockers: string[];
   /** Estimated confidence in the handoff completeness. */
   confidence: "high" | "medium" | "low";
+  /** Assistant that wrote the handoff. */
+  written_by: string;
+  /** Provenance of the stop event that wrote the handoff. */
+  source_kind: string;
+  /** Trust level of the stop event that wrote the handoff. */
+  source_confidence: string;
 }
+
+export interface HandoffProvenance {
+  writtenBy: string;
+  sourceKind: string;
+  sourceConfidence: string;
+}
+
+export interface CarryForwardState {
+  current_task: string;
+  next_session: string;
+  decisions: string[];
+  unresolved_errors: string[];
+  architecture_anchors: string[];
+}
+
+const CARRY_FORWARD_DECISION_LIMIT = 8;
+const CARRY_FORWARD_ERROR_LIMIT = 5;
+const CARRY_FORWARD_ARCHITECTURE_LIMIT = 5;
+const PRIOR_BRIEF_LIMIT = 5;
 
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
@@ -86,6 +112,108 @@ export function getHandoffPath(projectDir: string): string {
   const dir = join(projectDir, ".engram-cc");
   mkdirSync(dir, { recursive: true });
   return join(dir, "handoff.yaml");
+}
+
+function normalizeKey(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .slice(0, 80);
+}
+
+function parseStructuredHandoff(raw: string | null | undefined): StructuredHandoff | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<StructuredHandoff>;
+    return parsed && typeof parsed === "object" ? parsed as StructuredHandoff : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractAnchorSentences(text: string): string[] {
+  const sentences = text
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => truncateString(sentence.trim(), 180))
+    .filter(Boolean);
+  return sentences.slice(0, 2);
+}
+
+function pushUnique(target: string[], value: string, limit: number): void {
+  if (!value || target.length >= limit) return;
+  const normalized = normalizeKey(value);
+  if (!normalized) return;
+  const exists = target.some((entry) => normalizeKey(entry) === normalized);
+  if (!exists) target.push(value);
+}
+
+export function buildCarryForwardState(resumeChain?: ResumeHistoryRow[]): CarryForwardState | null {
+  if (!resumeChain || resumeChain.length === 0) return null;
+
+  const decisions = new Map<string, string>();
+  const unresolvedErrors = new Map<string, string>();
+  const architectureAnchors: string[] = [];
+  let currentTask = "";
+  let nextSession = "";
+
+  for (const row of resumeChain) {
+    const structured = parseStructuredHandoff(row.structured_handoff);
+    if (!structured) continue;
+
+    if (structured.current_task) {
+      currentTask = truncateString(structured.current_task, 220);
+    }
+    if (structured.next_session) {
+      nextSession = truncateString(structured.next_session, 220);
+    }
+
+    for (const decision of structured.decisions ?? []) {
+      const topicKey = normalizeKey(decision.topic);
+      if (!topicKey) continue;
+      if (decision.status === "REVERTED") {
+        decisions.delete(topicKey);
+        continue;
+      }
+      decisions.set(
+        topicKey,
+        truncateString(`[${decision.status}] ${decision.topic}: ${decision.decision}`, 220),
+      );
+    }
+
+    for (const error of structured.errors ?? []) {
+      const errorKey = normalizeKey(error.description);
+      if (!errorKey) continue;
+      if (error.status === "RESOLVED") {
+        unresolvedErrors.delete(errorKey);
+        continue;
+      }
+      unresolvedErrors.set(
+        errorKey,
+        truncateString(`[${error.status}] ${error.description}`, 220),
+      );
+    }
+
+    for (const sentence of extractAnchorSentences(structured.synthesis ?? "")) {
+      pushUnique(architectureAnchors, sentence, CARRY_FORWARD_ARCHITECTURE_LIMIT);
+    }
+  }
+
+  const carryForward: CarryForwardState = {
+    current_task: currentTask,
+    next_session: nextSession,
+    decisions: [...decisions.values()].slice(-CARRY_FORWARD_DECISION_LIMIT),
+    unresolved_errors: [...unresolvedErrors.values()].slice(-CARRY_FORWARD_ERROR_LIMIT),
+    architecture_anchors: architectureAnchors.slice(0, CARRY_FORWARD_ARCHITECTURE_LIMIT),
+  };
+
+  return (
+    carryForward.current_task ||
+    carryForward.next_session ||
+    carryForward.decisions.length > 0 ||
+    carryForward.unresolved_errors.length > 0 ||
+    carryForward.architecture_anchors.length > 0
+  ) ? carryForward : null;
 }
 
 // ── Synthesis input builder ───────────────────────────────────────────────────
@@ -116,8 +244,32 @@ export function buildSynthesisInput(
   currentTask: string,
   lastAction: string,
   priorCompactionBriefs?: string[],
+  carryForward?: CarryForwardState | null,
 ): string {
   const sections: string[] = [];
+
+  if (carryForward) {
+    sections.push("Carry-forward state from prior compaction cycles:");
+    if (carryForward.current_task) {
+      sections.push(`Carried current task: ${carryForward.current_task}`);
+    }
+    if (carryForward.next_session) {
+      sections.push(`Carried next step: ${carryForward.next_session}`);
+    }
+    if (carryForward.decisions.length > 0) {
+      sections.push("Persistent decisions:");
+      for (const decision of carryForward.decisions) sections.push(`- ${decision}`);
+    }
+    if (carryForward.architecture_anchors.length > 0) {
+      sections.push("Architecture anchors:");
+      for (const anchor of carryForward.architecture_anchors) sections.push(`- ${anchor}`);
+    }
+    if (carryForward.unresolved_errors.length > 0) {
+      sections.push("Persistent unresolved errors:");
+      for (const error of carryForward.unresolved_errors) sections.push(`- ${error}`);
+    }
+    sections.push("---");
+  }
 
   // Prior compaction cycles — prepend before tail so the SLM sees the full
   // session arc. Each brief summarizes everything up to that compaction point.
@@ -125,7 +277,7 @@ export function buildSynthesisInput(
   if (priorCompactionBriefs && priorCompactionBriefs.length > 0) {
     // Cap at 5 most recent cycles — prevents SLM context saturation on very long
     // sessions. Oldest cycles are already summarized inside the later briefs.
-    const recentBriefs = priorCompactionBriefs.slice(-5);
+    const recentBriefs = priorCompactionBriefs.slice(-PRIOR_BRIEF_LIMIT);
     const offset = priorCompactionBriefs.length - recentBriefs.length;
     sections.push("Session history from prior compaction cycles:");
     for (let i = 0; i < recentBriefs.length; i++) {
@@ -212,6 +364,7 @@ export async function buildHandoffFromEvents(
   transcript: TranscriptContext | null,
   compressor?: import("../compression/types.js").Compressor,
   resumeChain?: ResumeHistoryRow[],
+  provenance?: HandoffProvenance,
 ): Promise<HandoffData> {
   // Group events by category
   const byCategory: Record<string, StoredEvent[]> = {};
@@ -240,11 +393,14 @@ export async function buildHandoffFromEvents(
   ].slice(-15);
 
   // Errors: raw error data
-  const allErrors = errorEvents.map(e => truncateString(e.data, 200));
-  // Heuristic: last error in the session was likely resolved if no further errors follow.
-  // We can't know for sure, so we report all errors and let the user update.
+  const allErrors = errorEvents
+    .filter(e => e.type !== "error_resolved")
+    .map(e => truncateString(e.data, 200));
+  const errorsResolved = errorEvents
+    .filter(e => e.type === "error_resolved")
+    .map(e => truncateString(e.data, 200))
+    .slice(-10);
   const errorsEncountered = allErrors.slice(-10);
-  const errorsResolved: string[] = [];
 
   // next_steps: pending tasks from task events
   const creates: string[] = [];
@@ -309,11 +465,13 @@ export async function buildHandoffFromEvents(
     const priorCompactionBriefs = (resumeChain ?? [])
       .map(row => row.slm_brief ?? row.snapshot)
       .filter(Boolean) as string[];
+    const carryForward = buildCarryForwardState(resumeChain);
 
     const synthesisInput = buildSynthesisInput(
       promptEvents, decisionEvents, filesModified, allErrors,
       errorsResolved, currentTask, lastAction,
       priorCompactionBriefs,
+      carryForward,
     );
     if (synthesisInput.trim()) {
       try {
@@ -391,6 +549,9 @@ export async function buildHandoffFromEvents(
     open_questions: openQuestions,
     blockers,
     confidence,
+    written_by: provenance?.writtenBy ?? "unknown",
+    source_kind: provenance?.sourceKind ?? "native_hook",
+    source_confidence: provenance?.sourceConfidence ?? "exact",
   };
 }
 

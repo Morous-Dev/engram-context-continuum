@@ -30,6 +30,9 @@ export interface StoredEvent {
   priority: number;
   data: string;
   source_hook: string;
+  source_assistant: string;
+  source_kind: string;
+  source_confidence: string;
   created_at: string;
   data_hash: string;
 }
@@ -62,6 +65,8 @@ export interface ResumeHistoryRow {
   snapshot: string;
   /** SLM-synthesized <session_knowledge> XML, or null if SLM was unavailable. */
   slm_brief: string | null;
+  /** Structured diff-mode handoff JSON from the compaction SLM, or null. */
+  structured_handoff: string | null;
   /** Number of DB events captured at the time of this compaction. */
   event_count: number;
   /** UTC ISO timestamp of when this compaction snapshot was written. */
@@ -75,6 +80,9 @@ export interface FtsSearchResult {
   type: string;
   category: string;
   data: string;
+  source_assistant: string;
+  source_kind: string;
+  source_confidence: string;
   rank: number;
 }
 
@@ -88,6 +96,27 @@ const MAX_EVENTS_PER_SESSION = 1000;
 /** Number of recent events to check for deduplication. */
 const DEDUP_WINDOW = 5;
 
+/**
+ * Maximum events any single category can hold before balanced eviction
+ * kicks in.  Without this cap, high-rate P1 categories (file, checkpoint)
+ * fill the entire 1000-event buffer and evict all semantic context
+ * (intent, data, role, decision).
+ *
+ * At 200: the three dominant categories (file, checkpoint, error) can
+ * hold at most 600 events combined, guaranteeing 400 slots (40%) for
+ * semantic events (intent, data, role, decision, git, etc.).
+ */
+const MAX_PER_CATEGORY = 200;
+
+/** Maximum archived events per session. Prevents unbounded growth.
+ *  Set to 50 000 — enough for ~500 compaction cycles (100 events each).
+ *  Archive eviction removes the NEWEST entries to preserve early-session
+ *  context (session goals, initial anchors) which is most valuable to retain. */
+const MAX_ARCHIVE_PER_SESSION = 50_000;
+
+/** BM25 rank penalty for archive results (0.85 = 15% less relevant than live). */
+const ARCHIVE_RANK_PENALTY = 0.85;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Statement keys
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,7 +129,14 @@ const S = {
   getEventsByTypeAndPriority: "getEventsByTypeAndPriority",
   getEventCount: "getEventCount",
   checkDuplicate: "checkDuplicate",
-  evictLowestPriority: "evictLowestPriority",
+  selectEvictCandidate: "selectEvictCandidate",
+  selectEvictFromCategory: "selectEvictFromCategory",
+  deleteById: "deleteById",
+  topCategory: "topCategory",
+  archiveInsert: "archiveInsert",
+  archiveCount: "archiveCount",
+  archiveEvictNewest: "archiveEvictNewest",
+  deleteArchive: "deleteArchive",
   updateMetaLastEvent: "updateMetaLastEvent",
   ensureSession: "ensureSession",
   getSessionStats: "getSessionStats",
@@ -116,7 +152,10 @@ const S = {
   deleteResumeHistory: "deleteResumeHistory",
   getOldSessions: "getOldSessions",
   ftsSearch: "ftsSearch",
+  ftsSearchArchive: "ftsSearchArchive",
   ftsRebuild: "ftsRebuild",
+  ftsRebuildArchive: "ftsRebuildArchive",
+  getArchiveEvents: "getArchiveEvents",
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -163,6 +202,9 @@ export class SessionDB extends SQLiteBase {
         priority   INTEGER NOT NULL DEFAULT 2,
         data       TEXT    NOT NULL,
         source_hook TEXT   NOT NULL,
+        source_assistant TEXT NOT NULL DEFAULT 'unknown',
+        source_kind TEXT   NOT NULL DEFAULT 'native_hook',
+        source_confidence TEXT NOT NULL DEFAULT 'exact',
         created_at TEXT    NOT NULL DEFAULT (datetime('now')),
         data_hash  TEXT    NOT NULL DEFAULT ''
       );
@@ -191,6 +233,10 @@ export class SessionDB extends SQLiteBase {
       );
     `);
 
+    try { this.db.exec(`ALTER TABLE session_events ADD COLUMN source_assistant TEXT NOT NULL DEFAULT 'unknown'`); } catch {}
+    try { this.db.exec(`ALTER TABLE session_events ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'native_hook'`); } catch {}
+    try { this.db.exec(`ALTER TABLE session_events ADD COLUMN source_confidence TEXT NOT NULL DEFAULT 'exact'`); } catch {}
+
     // Migration: add slm_brief column to existing session_resume tables
     try {
       this.db.exec(`ALTER TABLE session_resume ADD COLUMN slm_brief TEXT`);
@@ -211,6 +257,7 @@ export class SessionDB extends SQLiteBase {
         compact_index INTEGER NOT NULL,
         snapshot      TEXT    NOT NULL,
         slm_brief     TEXT,
+        structured_handoff TEXT,
         event_count   INTEGER NOT NULL DEFAULT 0,
         created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
         UNIQUE(session_id, compact_index)
@@ -252,6 +299,56 @@ export class SessionDB extends SQLiteBase {
         VALUES (new.id, new.data, new.type, new.category);
       END;
     `);
+
+    // Archive table — evicted events are copied here before deletion.
+    // Keeps the full session history searchable even after FIFO eviction.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_events_archive (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT    NOT NULL,
+        type       TEXT    NOT NULL,
+        category   TEXT    NOT NULL,
+        priority   INTEGER NOT NULL DEFAULT 2,
+        data       TEXT    NOT NULL,
+        source_hook TEXT,
+        source_assistant TEXT NOT NULL DEFAULT 'unknown',
+        source_kind TEXT   NOT NULL DEFAULT 'native_hook',
+        source_confidence TEXT NOT NULL DEFAULT 'exact',
+        created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+        data_hash  TEXT    NOT NULL DEFAULT ''
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_sea_session ON session_events_archive(session_id);
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS session_events_archive_fts
+      USING fts5(
+        data,
+        type UNINDEXED,
+        category UNINDEXED,
+        content='session_events_archive',
+        content_rowid='id'
+      );
+
+      CREATE TRIGGER IF NOT EXISTS sea_fts_ai
+      AFTER INSERT ON session_events_archive BEGIN
+        INSERT INTO session_events_archive_fts(rowid, data, type, category)
+        VALUES (new.id, new.data, new.type, new.category);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS sea_fts_ad
+      AFTER DELETE ON session_events_archive BEGIN
+        INSERT INTO session_events_archive_fts(session_events_archive_fts, rowid, data, type, category)
+        VALUES ('delete', old.id, old.data, old.type, old.category);
+      END;
+    `);
+
+    try {
+      this.db.exec(`ALTER TABLE session_resume_history ADD COLUMN structured_handoff TEXT`);
+    } catch { /* column already exists */ }
+
+    try { this.db.exec(`ALTER TABLE session_events_archive ADD COLUMN source_assistant TEXT NOT NULL DEFAULT 'unknown'`); } catch {}
+    try { this.db.exec(`ALTER TABLE session_events_archive ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'native_hook'`); } catch {}
+    try { this.db.exec(`ALTER TABLE session_events_archive ADD COLUMN source_confidence TEXT NOT NULL DEFAULT 'exact'`); } catch {}
   }
 
   // ── Prepared statements ──────────────────────────────────────────────────────
@@ -263,23 +360,23 @@ export class SessionDB extends SQLiteBase {
     };
 
     p(S.insertEvent,
-      `INSERT INTO session_events (session_id, type, category, priority, data, source_hook, data_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      `INSERT INTO session_events (session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, data_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
     p(S.getEvents,
-      `SELECT id, session_id, type, category, priority, data, source_hook, created_at, data_hash
+      `SELECT id, session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
        FROM session_events WHERE session_id = ? ORDER BY id ASC LIMIT ?`);
 
     p(S.getEventsByType,
-      `SELECT id, session_id, type, category, priority, data, source_hook, created_at, data_hash
+      `SELECT id, session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
        FROM session_events WHERE session_id = ? AND type = ? ORDER BY id ASC LIMIT ?`);
 
     p(S.getEventsByPriority,
-      `SELECT id, session_id, type, category, priority, data, source_hook, created_at, data_hash
+      `SELECT id, session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
        FROM session_events WHERE session_id = ? AND priority >= ? ORDER BY id ASC LIMIT ?`);
 
     p(S.getEventsByTypeAndPriority,
-      `SELECT id, session_id, type, category, priority, data, source_hook, created_at, data_hash
+      `SELECT id, session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
        FROM session_events WHERE session_id = ? AND type = ? AND priority >= ? ORDER BY id ASC LIMIT ?`);
 
     p(S.getEventCount,
@@ -293,11 +390,51 @@ export class SessionDB extends SQLiteBase {
        WHERE recent.type = ? AND recent.data_hash = ?
        LIMIT 1`);
 
-    p(S.evictLowestPriority,
-      `DELETE FROM session_events WHERE id = (
-         SELECT id FROM session_events WHERE session_id = ?
-         ORDER BY priority ASC, id ASC LIMIT 1
-       )`);
+    // Archive-aware eviction: select candidate, archive it, then delete.
+    // priority DESC: higher priority number = lower importance → evict first.
+    // ASC on id breaks ties by age — oldest low-priority event evicted first.
+    p(S.selectEvictCandidate,
+      `SELECT id FROM session_events WHERE session_id = ?
+       ORDER BY priority DESC, id ASC LIMIT 1`);
+
+    p(S.selectEvictFromCategory,
+      `SELECT id FROM session_events WHERE session_id = ? AND category = ?
+       ORDER BY priority DESC, id ASC LIMIT 1`);
+
+    p(S.deleteById,
+      `DELETE FROM session_events WHERE id = ?`);
+
+    // Balanced eviction: find the category that holds the most events.
+    p(S.topCategory,
+      `SELECT category, COUNT(*) AS cnt
+       FROM session_events WHERE session_id = ?
+       GROUP BY category ORDER BY cnt DESC LIMIT 1`);
+
+    // Archive: copy row from session_events to archive before deletion
+    p(S.archiveInsert,
+      `INSERT INTO session_events_archive
+         (session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash)
+       SELECT session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
+       FROM session_events WHERE id = ?`);
+
+    p(S.archiveCount,
+      `SELECT COUNT(*) AS cnt FROM session_events_archive WHERE session_id = ?`);
+
+    // Evict NEWEST archive entries (not oldest) so early-session context
+    // (goals, initial anchors) is preserved permanently when cap is reached.
+    p(S.archiveEvictNewest,
+      `DELETE FROM session_events_archive WHERE id = (
+         SELECT id FROM session_events_archive WHERE session_id = ?
+         ORDER BY id DESC LIMIT 1)`);
+
+    p(S.deleteArchive,
+      `DELETE FROM session_events_archive WHERE session_id = ?`);
+
+    // Oldest-first so callers can slice [0:N] to get early-session events.
+    p(S.getArchiveEvents,
+      `SELECT id, session_id, type, category, priority, data, source_hook, source_assistant, source_kind, source_confidence, created_at, data_hash
+       FROM session_events_archive WHERE session_id = ?
+       ORDER BY id ASC LIMIT ?`);
 
     p(S.updateMetaLastEvent,
       `UPDATE session_meta
@@ -333,16 +470,17 @@ export class SessionDB extends SQLiteBase {
 
     p(S.appendResumeHistory,
       `INSERT INTO session_resume_history
-         (session_id, compact_index, snapshot, slm_brief, event_count)
-       VALUES (?, ?, ?, ?, ?)
+         (session_id, compact_index, snapshot, slm_brief, structured_handoff, event_count)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(session_id, compact_index) DO UPDATE SET
-         snapshot    = excluded.snapshot,
-         slm_brief   = excluded.slm_brief,
-         event_count = excluded.event_count,
-         created_at  = datetime('now')`);
+         snapshot          = excluded.snapshot,
+         slm_brief         = excluded.slm_brief,
+         structured_handoff = excluded.structured_handoff,
+         event_count       = excluded.event_count,
+         created_at        = datetime('now')`);
 
     p(S.getResumeChain,
-      `SELECT compact_index, snapshot, slm_brief, event_count, created_at
+      `SELECT compact_index, snapshot, slm_brief, structured_handoff, event_count, created_at
        FROM session_resume_history
        WHERE session_id = ?
        ORDER BY compact_index ASC`);
@@ -358,6 +496,7 @@ export class SessionDB extends SQLiteBase {
     // FTS5 search — returns rows ranked by BM25 relevance
     p(S.ftsSearch,
       `SELECT e.id, e.session_id, e.type, e.category, e.data,
+              e.source_assistant, e.source_kind, e.source_confidence,
               session_events_fts.rank AS rank
        FROM session_events_fts
        JOIN session_events e ON session_events_fts.rowid = e.id
@@ -368,6 +507,20 @@ export class SessionDB extends SQLiteBase {
     // FTS5 rebuild — re-syncs the virtual table from session_events content
     p(S.ftsRebuild,
       `INSERT INTO session_events_fts(session_events_fts) VALUES('rebuild')`);
+
+    // FTS5 search against archive — evicted events remain searchable
+    p(S.ftsSearchArchive,
+      `SELECT a.id, a.session_id, a.type, a.category, a.data,
+              a.source_assistant, a.source_kind, a.source_confidence,
+              session_events_archive_fts.rank AS rank
+       FROM session_events_archive_fts
+       JOIN session_events_archive a ON session_events_archive_fts.rowid = a.id
+       WHERE session_events_archive_fts MATCH ?
+       ORDER BY rank
+       LIMIT ?`);
+
+    p(S.ftsRebuildArchive,
+      `INSERT INTO session_events_archive_fts(session_events_archive_fts) VALUES('rebuild')`);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -381,14 +534,27 @@ export class SessionDB extends SQLiteBase {
    * DEDUP_WINDOW events for this session. Prevents storing identical events
    * from repeated tool calls.
    *
-   * Eviction: if session exceeds MAX_EVENTS_PER_SESSION, evicts the
-   * lowest-priority (then oldest) event to make room.
+   * Eviction (balanced): if session exceeds MAX_EVENTS_PER_SESSION, checks
+   * whether any single category exceeds MAX_PER_CATEGORY (default 400).
+   * If so, evicts from that dominant category first — this prevents
+   * high-rate P1 categories (file, checkpoint) from crowding out semantic
+   * context (intent, data, role, decision).  Falls back to standard
+   * priority-based eviction when no category is overrepresented.
    *
    * @param sessionId  - Session UUID.
    * @param event      - Event to insert.
    * @param sourceHook - Hook that generated this event (for provenance).
    */
-  insertEvent(sessionId: string, event: SessionEvent, sourceHook = "PostToolUse"): void {
+  insertEvent(
+    sessionId: string,
+    event: SessionEvent,
+    sourceHook = "PostToolUse",
+    provenance?: {
+      sourceAssistant?: string;
+      sourceKind?: string;
+      sourceConfidence?: string;
+    },
+  ): void {
     const dataHash = createHash("sha256")
       .update(event.data)
       .digest("hex")
@@ -402,12 +568,39 @@ export class SessionDB extends SQLiteBase {
 
       const countRow = this.stmt(S.getEventCount).get(sessionId) as { cnt: number };
       if (countRow.cnt >= MAX_EVENTS_PER_SESSION) {
-        this.stmt(S.evictLowestPriority).run(sessionId);
+        // Balanced eviction: check if any category is hogging the buffer.
+        // If the dominant category exceeds MAX_PER_CATEGORY, evict from it
+        // to preserve diversity.  Otherwise fall back to priority-based.
+        let evictId: number | undefined;
+        const top = this.stmt(S.topCategory).get(sessionId) as { category: string; cnt: number } | undefined;
+        if (top && top.cnt > MAX_PER_CATEGORY) {
+          const row = this.stmt(S.selectEvictFromCategory).get(sessionId, top.category) as { id: number } | undefined;
+          evictId = row?.id;
+        } else {
+          const row = this.stmt(S.selectEvictCandidate).get(sessionId) as { id: number } | undefined;
+          evictId = row?.id;
+        }
+
+        if (evictId !== undefined) {
+          // Archive the event before deleting — preserves full session history
+          this.stmt(S.archiveInsert).run(evictId);
+          this.stmt(S.deleteById).run(evictId);
+
+          // Cap archive size to prevent unbounded growth
+          const archiveCount = this.stmt(S.archiveCount).get(sessionId) as { cnt: number };
+          if (archiveCount.cnt > MAX_ARCHIVE_PER_SESSION) {
+            this.stmt(S.archiveEvictNewest).run(sessionId);
+          }
+        }
       }
 
       this.stmt(S.insertEvent).run(
         sessionId, event.type, event.category, event.priority,
-        event.data, sourceHook, dataHash,
+        event.data, sourceHook,
+        provenance?.sourceAssistant ?? "unknown",
+        provenance?.sourceKind ?? "native_hook",
+        provenance?.sourceConfidence ?? "exact",
+        dataHash,
       );
 
       this.stmt(S.updateMetaLastEvent).run(sessionId);
@@ -434,6 +627,20 @@ export class SessionDB extends SQLiteBase {
     return this.stmt(S.getEvents).all(sessionId, limit) as StoredEvent[];
   }
 
+  /**
+   * Retrieve archived events for a session in oldest-first order.
+   *
+   * Callers can slice `[0:N]` to get only early-session events, where
+   * domain anchor terms (topics, project vocabulary) are most concentrated.
+   *
+   * @param sessionId - Session UUID.
+   * @param limit     - Maximum rows to return (default 50 000).
+   * @returns Archive events ordered oldest-first by insertion id.
+   */
+  getArchiveEvents(sessionId: string, limit = 50_000): StoredEvent[] {
+    return this.stmt(S.getArchiveEvents).all(sessionId, limit) as StoredEvent[];
+  }
+
   /** Get the total event count for a session. */
   getEventCount(sessionId: string): number {
     return (this.stmt(S.getEventCount).get(sessionId) as { cnt: number }).cnt;
@@ -451,7 +658,32 @@ export class SessionDB extends SQLiteBase {
    * @returns Array of matching events ranked by relevance (best match first).
    */
   searchEvents(query: string, limit = 20): FtsSearchResult[] {
-    return this.stmt(S.ftsSearch).all(query, limit) as FtsSearchResult[];
+    const liveResults = this.stmt(S.ftsSearch).all(query, limit) as FtsSearchResult[];
+
+    let archiveResults: FtsSearchResult[] = [];
+    try {
+      archiveResults = this.stmt(S.ftsSearchArchive).all(query, limit) as FtsSearchResult[];
+      // Apply recency penalty — archive results rank slightly lower than live
+      for (const r of archiveResults) {
+        r.rank = r.rank * ARCHIVE_RANK_PENALTY;
+      }
+    } catch {
+      // Archive table may not exist in older DBs — graceful fallback
+    }
+
+    // Merge and deduplicate by content prefix (handles re-inserted events)
+    const seen = new Set<string>();
+    const merged: FtsSearchResult[] = [];
+    const all = [...liveResults, ...archiveResults].sort((a, b) => a.rank - b.rank);
+    for (const r of all) {
+      const key = r.data.slice(0, 200);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(r);
+      if (merged.length >= limit) break;
+    }
+
+    return merged;
   }
 
   /**
@@ -460,6 +692,9 @@ export class SessionDB extends SQLiteBase {
    */
   rebuildFts(): void {
     this.stmt(S.ftsRebuild).run();
+    try {
+      this.stmt(S.ftsRebuildArchive).run();
+    } catch { /* archive table may not exist in older DBs */ }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -514,6 +749,7 @@ export class SessionDB extends SQLiteBase {
    * @param compactIndex - 1-based compaction cycle number.
    * @param snapshot     - Rule-based XML resume snapshot at this compaction point.
    * @param slmBrief     - SLM-synthesized <session_knowledge> XML, or null.
+   * @param structuredHandoff - Structured diff-mode handoff JSON, or null.
    * @param eventCount   - Total DB events at the time of this compaction.
    */
   appendResumeHistory(
@@ -521,9 +757,17 @@ export class SessionDB extends SQLiteBase {
     compactIndex: number,
     snapshot: string,
     slmBrief: string | null,
+    structuredHandoff: string | null,
     eventCount: number,
   ): void {
-    this.stmt(S.appendResumeHistory).run(sessionId, compactIndex, snapshot, slmBrief, eventCount);
+    this.stmt(S.appendResumeHistory).run(
+      sessionId,
+      compactIndex,
+      snapshot,
+      slmBrief,
+      structuredHandoff,
+      eventCount,
+    );
   }
 
   /**
@@ -546,6 +790,7 @@ export class SessionDB extends SQLiteBase {
   deleteSession(sessionId: string): void {
     this.db.transaction(() => {
       this.stmt(S.deleteEvents).run(sessionId);
+      this.stmt(S.deleteArchive).run(sessionId);
       this.stmt(S.deleteResume).run(sessionId);
       this.stmt(S.deleteResumeHistory).run(sessionId);
       this.stmt(S.deleteMeta).run(sessionId);

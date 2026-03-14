@@ -17,7 +17,7 @@
  * Note: Gemma 3 4B has no thinking mode — no /no_think prefix required.
  *
  * Model file: gemma-3-4b-it-qat-q4_0.gguf (~2.37 GB)
- * Location:   ~/.engram-cc/models/
+ * Location:   shared models dir configured in <projectDir>/.engram-cc/config.json
  * RAM needed:  ~3 GB VRAM (GPU) or ~2.5 GB RAM (CPU)
  *
  * Depends on: node-llama-cpp (optional native npm package),
@@ -28,19 +28,19 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
 import type { Compressor, CompressionResult, EmbedResult, StructuredHandoff } from "./types.js";
 import { Tier1Compressor } from "./tier1.js";
 import { Tier2Compressor } from "./tier2.js";
 import { preprocessSessionData } from "./preprocess.js";
 import { HANDOFF_SCHEMA, buildDiffModePrompt } from "./schema.js";
+import { getProjectModelsDir, getRuntimeProjectDir } from "../project-id.js";
 
 // ── Model file ─────────────────────────────────────────────────────────────────
 
 const MODEL_FILE = "gemma-3-4b-it-qat-q4_0.gguf";
 
 function getModelPath(): string {
-  return join(homedir(), ".engram-cc", "models", MODEL_FILE);
+  return join(getProjectModelsDir(getRuntimeProjectDir()), MODEL_FILE);
 }
 
 // ── Prose fallback prompt ────────────────────────────────────────────────────
@@ -141,8 +141,13 @@ export class Tier3cCompressor implements Compressor {
   private grammar: LlamaGrammarInstance | null = null;
 
   constructor() {
-    this.modelPath = getModelPath();
-    this._available = existsSync(this.modelPath);
+    try {
+      this.modelPath = getModelPath();
+      this._available = existsSync(this.modelPath);
+    } catch {
+      this.modelPath = "";
+      this._available = false;
+    }
   }
 
   isAvailable(): boolean {

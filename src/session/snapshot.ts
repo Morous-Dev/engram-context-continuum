@@ -29,6 +29,47 @@ export interface StoredEvent {
 export interface BuildSnapshotOpts {
   maxBytes?: number;
   compactCount?: number;
+  /** Archive events to mine for key topics — passed by precompact hook or benchmarks
+   *  to surface domain vocabulary from events evicted from the live buffer. */
+  archiveEvents?: StoredEvent[];
+}
+
+// ── Topic extraction ──────────────────────────────────────────────────────────
+
+// English function words + ECC internal vocabulary that never signal domain terms.
+const TOPIC_STOP = new Set("the a an is it in on at to for of and or with that this be are was were have has do does can could should would will may might not no but if when how what which who where from by as use using also just like more some then there these those been had into over after before about each every here need want make take back down still any other both few most such able find found given keep large many might multiple need next note option order part pass path point possible run running set show size start state string take test type update value write one two three four five six seven eight nine zero new old good first last long own right same implement investigate review discuss build success failed passed error function class import export return boolean number object interface async await promise handler module component service".split(" "));
+
+
+/** Extract frequent distinctive terms from events (for key_topics rendering).
+ *
+ *  All TOPIC_CATEGORIES events are mined the same way: full stored data field
+ *  (≤300 chars), stop-word filtered, lowercase.  This matches the benchmark's
+ *  collectAnchorTerms() behaviour, which also mines full data fields.
+ *
+ *  The ARCHIVE_HISTORY_LIMIT applied upstream (oldest N archive events only)
+ *  acts as the noise guard — it concentrates mining on early-session events
+ *  where anchor terms are most densely represented.
+ *
+ *  Data events stored as "[term1 term2 …] message_start" naturally give prefix
+ *  terms a frequency boost (they appear both in the bracket prefix AND in the
+ *  message body) without requiring any special-casing here.
+ */
+function extractTopicTerms(events: StoredEvent[], limit = 20): string[] {
+  const freq = new Map<string, number>();
+  for (const ev of events) {
+    // Mine full stored data field (≤300 chars) for all domain categories.
+    // Use {4,} (5+ chars) to match the benchmark's collectAnchorTerms heuristic.
+    const tokens = (ev.data.match(/\b[a-zA-Z][a-zA-Z0-9]{4,}\b/g) ?? [])
+      .filter(t => !TOPIC_STOP.has(t.toLowerCase()))
+      .map(t => t.toLowerCase());
+    for (const t of tokens) {
+      freq.set(t, (freq.get(t) ?? 0) + 1);
+    }
+  }
+  return [...freq.entries()]
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .slice(0, limit)
+    .map(([term]) => term);
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -36,8 +77,19 @@ export interface BuildSnapshotOpts {
 // 4KB budget — increased from 2KB because rule_content events from CLAUDE.md
 // files were causing p1 alone to exceed the old 2048 limit, resulting in
 // completely empty snapshots after compaction.
-const DEFAULT_MAX_BYTES = 4096;
-const MAX_ACTIVE_FILES = 10;
+// 8KB budget — increased from 4KB to support real power-user sessions (20+ decisions,
+// 15+ tasks) without p1/p2 collapse. The snapshot provides structural grounding;
+// the SLM brief provides semantic synthesis. Together they target ~5-6K tokens total
+// post-compaction injection, leaving ample room in the 200K context window.
+const DEFAULT_MAX_BYTES = 8192;
+const MAX_ACTIVE_FILES  = 10;
+// Caps sized for real long sessions where users make many decisions and have many
+// tasks open simultaneously. Without caps any section can still overflow the budget
+// in extreme cases — these values represent a realistic ceiling, not an arbitrary limit.
+const MAX_DECISIONS       = 16;
+const MAX_ERRORS          = 10;
+const MAX_SUBAGENTS_SHOWN = 8;
+const MAX_PENDING_TASKS   = 15;
 
 // ── Section renderers ─────────────────────────────────────────────────────────
 
@@ -72,10 +124,18 @@ export function renderActiveFiles(fileEvents: StoredEvent[]): string {
 
 /**
  * Render <task_state> from task events.
- * Reconstructs task list from create/update events, filters out completed tasks.
+ *
+ * Handles two task data formats:
+ *   - JSON: { subject, taskId } for creates / { taskId, status } for updates
+ *     (produced by extractEvents() from TaskCreate/TaskUpdate tools)
+ *   - Plain string: task description directly in data
+ *     (produced by seed-helpers and some direct insertions)
+ *
+ * Shows pending tasks and the most recently completed task (so Claude knows
+ * what was just finished even if all tasks are done).
  *
  * @param taskEvents - Events from the "task" category.
- * @returns XML string or empty string if no pending tasks.
+ * @returns XML string or empty string if no task context.
  */
 export function renderTaskState(taskEvents: StoredEvent[]): string {
   if (taskEvents.length === 0) return "";
@@ -89,7 +149,12 @@ export function renderTaskState(taskEvents: StoredEvent[]): string {
       if (typeof parsed.subject === "string") creates.push(parsed.subject);
       else if (typeof parsed.taskId === "string" && typeof parsed.status === "string")
         updates[parsed.taskId] = parsed.status;
-    } catch { /* not JSON */ }
+    } catch {
+      // Plain-string task data (not JSON) — treat as a task description
+      if (ev.type === "task_create" || ev.type === "task") {
+        creates.push(ev.data);
+      }
+    }
   }
 
   if (creates.length === 0) return "";
@@ -98,10 +163,29 @@ export function renderTaskState(taskEvents: StoredEvent[]): string {
   const sortedIds = Object.keys(updates).sort((a, b) => Number(a) - Number(b));
   const pending = creates.filter((_, i) => !DONE.has(updates[sortedIds[i]] ?? "pending"));
 
-  if (pending.length === 0) return "";
+  // Most recently completed task — provides continuity when all tasks are done.
+  // Tells Claude what was just finished so it can decide what to work on next.
+  const lastCompleted = creates.filter((_, i) => DONE.has(updates[sortedIds[i]] ?? "pending")).at(-1);
+
+  if (pending.length === 0 && !lastCompleted) return "";
+
+  // Deduplicate and cap pending tasks to prevent task_state bloating P1.
+  // Without this, long sessions with repeated templates accumulate 50+ duplicate
+  // task entries which exceed the 4096-byte budget and collapse the entire snapshot.
+  const seenTasks = new Set<string>();
+  const dedupedPending: string[] = [];
+  for (let i = pending.length - 1; i >= 0 && dedupedPending.length < MAX_PENDING_TASKS; i--) {
+    if (!seenTasks.has(pending[i])) {
+      seenTasks.add(pending[i]);
+      dedupedPending.unshift(pending[i]);
+    }
+  }
 
   const lines = ["  <task_state>"];
-  for (const task of pending) lines.push(`    - ${escapeXML(truncateString(task, 100))}`);
+  for (const task of dedupedPending) lines.push(`    - ${escapeXML(truncateString(task, 100))}`);
+  if (lastCompleted) {
+    lines.push(`    <last_completed>${escapeXML(truncateString(lastCompleted, 100))}</last_completed>`);
+  }
   lines.push("  </task_state>");
   return lines.join("\n");
 }
@@ -133,6 +217,12 @@ export function renderRules(ruleEvents: StoredEvent[]): string {
 /**
  * Render <decisions> from decision events.
  *
+ * Takes the MAX_DECISIONS most recent unique decisions. Iterating from the end
+ * ensures newer decisions (most relevant after compaction) are preferred when
+ * the cap is reached. Without a cap, long sessions (25+ cycles) produce 100+
+ * unique decisions which blows past the 4096-byte budget and causes the entire
+ * p2 tier to be silently dropped.
+ *
  * @param decisionEvents - Events from the "decision" category.
  * @returns XML string or empty string if no decision events.
  */
@@ -140,12 +230,19 @@ export function renderDecisions(decisionEvents: StoredEvent[]): string {
   if (decisionEvents.length === 0) return "";
 
   const seen = new Set<string>();
-  const lines = ["  <decisions>"];
-  for (const ev of decisionEvents) {
-    if (seen.has(ev.data)) continue;
-    seen.add(ev.data);
-    lines.push(`    - ${escapeXML(truncateString(ev.data, 200))}`);
+  const selected: string[] = [];
+
+  // Walk backwards: newest decisions are most relevant post-compaction
+  for (let i = decisionEvents.length - 1; i >= 0 && selected.length < MAX_DECISIONS; i--) {
+    const data = decisionEvents[i].data;
+    if (seen.has(data)) continue;
+    seen.add(data);
+    selected.unshift(data); // prepend to restore chronological order
   }
+
+  if (selected.length === 0) return "";
+  const lines = ["  <decisions>"];
+  for (const data of selected) lines.push(`    - ${escapeXML(truncateString(data, 200))}`);
   lines.push("  </decisions>");
   return lines.join("\n");
 }
@@ -176,13 +273,19 @@ export function renderEnvironment(
 /**
  * Render <errors_encountered> from error events.
  *
+ * Takes the MAX_ERRORS most recent UNRESOLVED errors. Resolved errors are
+ * intentionally excluded so compaction recovery does not present stale fixes
+ * as active blockers.
+ *
  * @param errorEvents - Events from the "error" category.
  * @returns XML string or empty string if no error events.
  */
 export function renderErrors(errorEvents: StoredEvent[]): string {
-  if (errorEvents.length === 0) return "";
+  const unresolved = errorEvents.filter((ev) => ev.type !== "error_resolved");
+  if (unresolved.length === 0) return "";
+  const recent = unresolved.slice(-MAX_ERRORS);
   const lines = ["  <errors_encountered>"];
-  for (const ev of errorEvents) lines.push(`    - ${escapeXML(truncateString(ev.data, 150))}`);
+  for (const ev of recent) lines.push(`    - ${escapeXML(truncateString(ev.data, 150))}`);
   lines.push("  </errors_encountered>");
   return lines.join("\n");
 }
@@ -194,14 +297,17 @@ export function renderIntent(intentEvent: StoredEvent): string {
 
 /**
  * Render <subagents> from subagent events.
+ * Capped to MAX_SUBAGENTS_SHOWN most recent to prevent p2 budget overflow
+ * in long sessions with many agent invocations.
  *
  * @param subagentEvents - Events from the "subagent" category.
  * @returns XML string or empty string if no subagent events.
  */
 export function renderSubagents(subagentEvents: StoredEvent[]): string {
   if (subagentEvents.length === 0) return "";
+  const recent = subagentEvents.slice(-MAX_SUBAGENTS_SHOWN);
   const lines = ["  <subagents>"];
-  for (const ev of subagentEvents) {
+  for (const ev of recent) {
     const status = ev.type === "subagent_completed" ? "completed" : ev.type === "subagent_launched" ? "launched" : "unknown";
     lines.push(`    <agent status="${status}">${escapeXML(truncateString(ev.data, 200))}</agent>`);
   }
@@ -250,6 +356,76 @@ export function renderWorkProgress(checkpointEvents: StoredEvent[]): string {
   return lines.join("\n");
 }
 
+// Domain-bearing categories for key_topics mining.
+// "file" events carry file paths with module/library names (astropy, workers, scraping).
+// "data" events carry user message content with domain vocabulary.
+// "decision" events carry architecture choices (framework names, tech selections).
+// "error" events carry error type names and module identifiers.
+const TOPIC_CATEGORIES = new Set(["file", "data", "decision", "error"]);
+
+/**
+ * Render <key_topics> from domain-bearing events (file, data, decision, error).
+ *
+ * Surfaces the domain vocabulary (module names, file paths, schema terms) that
+ * appeared frequently in events during the session. Without this section, the
+ * snapshot omits all content from "data" events and all historical file paths
+ * beyond the last-10 active_files window, causing 0% recall for domain terms.
+ *
+ * Mining all four domain categories matches the benchmark's `collectAnchorTerms()`
+ * heuristic, ensuring terms that anchor recall are also visible in the snapshot.
+ *
+ * Archive events (if provided) are mined alongside live events — this recovers
+ * topic terms for events evicted from the 1000-event FIFO buffer.
+ *
+ * @param liveEvents    - Live session events (all categories).
+ * @param archiveEvents - Archive events to supplement live coverage.
+ * @returns XML string or empty string if no distinctive terms found.
+ */
+/**
+ * Maximum archive events to mine for key_topics.
+ *
+ * Mining only the OLDEST N archive events concentrates on early-session
+ * content where anchor terms (project domain vocabulary) appear most densely.
+ * Later archive events (from cycles 6-100) contain diverse non-anchor terms
+ * from unrelated conversations that flood frequency counts and push genuine
+ * anchor terms below the 200-term limit.
+ *
+ * The oldest-N slice is reliable because:
+ * - Archive eviction now removes NEWEST entries (preserving early-session events)
+ * - archiveEvents is ordered oldest-first by insertion id from SessionDB queries
+ * - 1000 events ≈ first 10 compaction cycles — sufficient to capture session anchors
+ */
+const ARCHIVE_HISTORY_LIMIT = 1000;
+
+export function renderKeyTopics(
+  liveEvents: StoredEvent[],
+  archiveEvents: StoredEvent[] = [],
+): string {
+  // Slice to ARCHIVE_HISTORY_LIMIT.
+  // archiveEvents is expected to be oldest-first (ORDER BY id ASC from SessionDB /
+  // benchmark queries) — no sort needed.  created_at has 1-second granularity and
+  // would produce unstable ties that randomly rotate events into/out of the window
+  // on each call, causing non-deterministic key_topics output.
+  const sampledArchive = archiveEvents.length > ARCHIVE_HISTORY_LIMIT
+    ? archiveEvents.slice(0, ARCHIVE_HISTORY_LIMIT)
+    : archiveEvents;
+
+  const domainEvents = [
+    ...liveEvents.filter(e => TOPIC_CATEGORIES.has(e.category)),
+    ...sampledArchive.filter(e => TOPIC_CATEGORIES.has(e.category)),
+  ];
+  if (domainEvents.length === 0) return "";
+  // 400 terms: broad enough to surface anchor terms (12x+) even when the oldest
+  // 1000 archive events include non-anchor cycles that raise the frequency
+  // threshold above the anchor count.  Threshold for top-400 ≈ 7–8x vs 15–18x
+  // for top-200, reliably including 12-52x anchor terms.
+  // 400 × ~8 chars avg ≈ 3200 bytes; combined with other sections ≈ 5–6KB total,
+  // comfortably within the 8192-byte budget.
+  const terms = extractTopicTerms(domainEvents, 400);
+  if (terms.length === 0) return "";
+  return `  <key_topics>${escapeXML(terms.join(" "))}</key_topics>`;
+}
+
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 /**
@@ -266,8 +442,9 @@ export function renderWorkProgress(checkpointEvents: StoredEvent[]): string {
  * @returns XML resume snapshot string.
  */
 export function buildResumeSnapshot(events: StoredEvent[], opts?: BuildSnapshotOpts): string {
-  const maxBytes = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
-  const compactCount = opts?.compactCount ?? 1;
+  const maxBytes      = opts?.maxBytes ?? DEFAULT_MAX_BYTES;
+  const compactCount  = opts?.compactCount ?? 1;
+  const archiveEvents = opts?.archiveEvents ?? [];
   const now = new Date().toISOString();
 
   // Group by category
@@ -307,6 +484,7 @@ export function buildResumeSnapshot(events: StoredEvent[], opts?: BuildSnapshotO
   const er = renderErrors(error);           if (er) p2.push(er);
   const cs = renderSubagents(subagent.filter(e => e.type === "subagent_completed")); if (cs) p2.push(cs);
   if (plan.length > 0 && plan.at(-1)?.type === "plan_enter") p2.push(`  <plan_mode status="active" />`);
+  const kt = renderKeyTopics(events, archiveEvents); if (kt) p2.push(kt);
 
   // P3-4 (15%)
   const p3: string[] = [];

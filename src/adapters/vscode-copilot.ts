@@ -1,135 +1,64 @@
 /**
  * vscode-copilot.ts — EngramCC adapter for VS Code Copilot.
  *
- * What this file is: registers EngramCC hooks and MCP server with VS Code Copilot.
- * Responsible for: writing hook entries to the user-level VS Code hooks config
- *   and the MCP server entry to the user-level mcp.json. VS Code Copilot uses
+ * What this file is: generates project-local VS Code Copilot setup snippets.
+ * Responsible for: writing hook and MCP examples under
+ *   <projectDir>/.engram-cc/assistant-configs/vscode-copilot/. VS Code Copilot uses
  *   identical event names to Claude Code (PostToolUse, PreCompact, SessionStart,
  *   Stop, UserPromptSubmit) so the same hook scripts can be reused directly.
- *
- *   Hook config: %APPDATA%/Code/User/hooks.json  (Windows)
- *                ~/Library/Application Support/Code/User/hooks.json  (macOS)
- *                ~/.config/Code/User/hooks.json  (Linux)
- *   MCP config:  same directory / mcp.json
- *
- * Depends on: node:fs, node:path, node:os, src/adapters/detect.ts.
+ * Depends on: src/adapters/detect.ts, src/adapters/local-config.ts.
  * Depended on by: src/adapters/index.ts.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { isVSCodeInstalled, getVSCodeUserDir } from "./detect.js";
+import { isVSCodeInstalled } from "./detect.js";
 import type { AssistantAdapter, RegistrationResult } from "./types.js";
+import { getMcpServerPath, writeLocalAdapterArtifact } from "./local-config.js";
 
 const MARKER = "engram-cc";
 
-interface VSCodeHookEntry {
-  type: string;
-  command: string;
-}
-
-interface VSCodeHooksConfig {
-  hooks?: Record<string, VSCodeHookEntry[]>;
-  [key: string]: unknown;
-}
-
-interface VSCodeMcp {
-  servers?: Record<string, { type: string; command: string; args?: string[] }>;
-  [key: string]: unknown;
-}
-
-function readJson<T>(path: string, fallback: T): T {
-  if (!existsSync(path)) return fallback;
-  try { return JSON.parse(readFileSync(path, "utf-8")) as T; }
-  catch { return fallback; }
-}
-
-function writeJson(path: string, data: unknown): void {
-  writeFileSync(path, JSON.stringify(data, null, 2) + "\n", "utf-8");
-}
-
 export class VSCodeCopilotAdapter implements AssistantAdapter {
   readonly name = "VS Code Copilot";
+  readonly capabilities = {
+    session_start: "unsupported",
+    user_prompt_submit: "unsupported",
+    post_tool_use: "unsupported",
+    pre_compact: "unsupported",
+    stop: "unsupported",
+  } as const;
 
   isInstalled(): boolean {
     return isVSCodeInstalled();
   }
 
   /**
-   * Register hooks in the VS Code user hooks.json.
-   * VS Code uses identical event names to Claude Code — same scripts, different file.
+   * VS Code remains MCP-read-only. Emit a local note rather than touching user config.
    */
-  registerHooks(packageRoot: string): RegistrationResult {
-    const userDir = getVSCodeUserDir();
-    if (!userDir) {
-      return { success: false, skipped: true, message: "VS Code user directory not found" };
-    }
-
-    try {
-      mkdirSync(userDir, { recursive: true });
-      const hooksPath = join(userDir, "hooks.json");
-      const config = readJson<VSCodeHooksConfig>(hooksPath, {});
-      if (!config.hooks) config.hooks = {};
-
-      const hooksDir = join(packageRoot, "src", "hooks").replace(/\\/g, "/");
-      const buildDir  = join(packageRoot, "build", "hooks").replace(/\\/g, "/");
-      const hookDefs: Array<[string, string]> = [
-        ["PostToolUse",      `node "${hooksDir}/posttooluse.mjs"`],
-        ["PreCompact",       `node "${hooksDir}/precompact.mjs"`],
-        ["SessionStart",     `node "${hooksDir}/sessionstart.mjs"`],
-        ["UserPromptSubmit", `node "${hooksDir}/userpromptsubmit.mjs"`],
-        ["Stop",             `node "${buildDir}/stop.js"`],
-      ];
-
-      let registered = 0;
-      for (const [event, command] of hookDefs) {
-        if (!config.hooks[event]) config.hooks[event] = [];
-        const already = config.hooks[event].some(h => h.command?.includes(MARKER));
-        if (!already) {
-          config.hooks[event].push({ type: "command", command });
-          registered++;
-        }
-      }
-
-      writeJson(hooksPath, config);
-      return {
-        success: true,
-        skipped: registered === 0,
-        message: registered > 0
-          ? `Registered ${registered} hooks in ${hooksPath}`
-          : `Hooks already registered in ${hooksPath}`,
-      };
-    } catch (err) {
-      return { success: false, skipped: false, message: `Failed: ${String(err)}` };
-    }
+  registerHooks(_packageRoot: string, projectRoot: string): RegistrationResult {
+    return writeLocalAdapterArtifact(
+      projectRoot,
+      "vscode-copilot",
+      "hooks.txt",
+      "VS Code Copilot hook note",
+      "Hooks are not supported for VS Code Copilot in ECC local-only mode. Use the MCP snippet only.",
+    );
   }
 
   /**
-   * Register the MCP server in the VS Code user mcp.json.
-   * VS Code 1.99+ uses ~/.vscode/mcp.json for user-level MCP servers.
+   * Emit a project-local VS Code MCP snippet.
    */
-  registerMcp(packageRoot: string): RegistrationResult {
-    const userDir = getVSCodeUserDir();
-    if (!userDir) {
-      return { success: false, skipped: true, message: "VS Code user directory not found" };
-    }
+  registerMcp(packageRoot: string, projectRoot: string): RegistrationResult {
+    const mcp = {
+      servers: {
+        [MARKER]: { type: "stdio", command: "node", args: [getMcpServerPath(packageRoot)] },
+      },
+    };
 
-    try {
-      mkdirSync(userDir, { recursive: true });
-      const mcpPath = join(userDir, "mcp.json");
-      const mcp = readJson<VSCodeMcp>(mcpPath, {});
-      if (!mcp.servers) mcp.servers = {};
-
-      if (mcp.servers[MARKER]) {
-        return { success: true, skipped: true, message: `MCP already registered in ${mcpPath}` };
-      }
-
-      const serverPath = join(packageRoot, "build", "mcp", "server.js").replace(/\\/g, "/");
-      mcp.servers[MARKER] = { type: "stdio", command: "node", args: [serverPath] };
-      writeJson(mcpPath, mcp);
-      return { success: true, skipped: false, message: `MCP server registered in ${mcpPath}` };
-    } catch (err) {
-      return { success: false, skipped: false, message: `Failed: ${String(err)}` };
-    }
+    return writeLocalAdapterArtifact(
+      projectRoot,
+      "vscode-copilot",
+      "mcp.json",
+      "VS Code Copilot MCP snippet",
+      JSON.stringify(mcp, null, 2),
+    );
   }
 }

@@ -1,6 +1,6 @@
 # Engram Context Continuum (EngramCC) — Project Context
 
-Last verified: 2026-03-12
+Last verified: 2026-03-13
 This file is the project-specific companion to CLAUDE.md.
 Code and migrations win over this file when facts conflict.
 
@@ -15,8 +15,9 @@ Code and migrations win over this file when facts conflict.
 | Full-text search | SQLite FTS5 virtual table |
 | Knowledge graph | SQLite tables (graph_nodes + graph_edges + BFS) |
 | Vector store | sqlite-vec extension (optional, graceful fallback) |
-| SLM Tier 2 | @huggingface/transformers ONNX — embeddings |
-| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B / Qwen3.5 4B / Gemma 3 4B GGUF (all 10/10 adversarial) |
+| SLM Tier 2 | @huggingface/transformers ONNX — hardware-profile-aware embedding specialist (BGE-large/BGE-base/MiniLM) |
+| SLM Tier 3 | node-llama-cpp + Llama 3.2 3B / Qwen3.5 4B / Gemma 3 4B GGUF (all 10/11 adversarial; A11 multi-compaction chain is a known gap) |
+| Query Expander | node-llama-cpp + Gemma 3 1B QAT Q4_0 GGUF (FTS5 term expansion, optional) |
 | SLM Tier 4 | External HTTP provider (Ollama / LM Studio / Groq) |
 | Memory files | YAML (handoff.yaml, working.yaml in .engram-cc/) |
 | Project identity | UUID in .ecc-id (git-root-hash fallback, generated fallback) |
@@ -50,20 +51,24 @@ When facts conflict, use:
 - **No auth, no network** — fully local, zero remote calls for core function
 - **Project identity** — stable UUID from `.ecc-id` file; falls back to git root commit
   hash; falls back to fresh UUIDv4. Written once, survives renames and moves.
-- **Session DB path** — `~/.engram-cc/sessions/<uuid>.db`
+- **Session DB path** — `<projectDir>/.engram-cc/sessions/<uuid>.db`
 - **Hook event flow:**
-  - `UserPromptSubmit` — captures user intent, stores to DB
-  - `PostToolUse` — captures tool results, file ops, errors + subconscious retrieval:
-    on Edit/Write/Bash/AskUserQuestion, searches VectorDB (cross-session) and FTS5
-    (current session) for relevant memories and injects them as additionalContext
+  - `UserPromptSubmit` — captures user intent, stores to DB; then embeds the prompt
+    and retrieves semantically relevant past memories from VectorDB (distance < 0.60),
+    injecting them as `additionalContext` before Claude processes the message
+  - `PostToolUse` — captures tool results, file ops, errors; immediately embeds
+    significant events (decision/error/task/rule) into VectorDB for within-session
+    semantic memory (live continuous indexing); on Edit/Write/Bash/AskUserQuestion,
+    also searches VectorDB (cross-session + live) and FTS5 (current session + archive)
+    for relevant memories and injects them as additionalContext
   - `PreCompact` — 3-layer compaction recovery: XML snapshot + SLM brief + engram
-    retrieval (vector/FTS/graph). Parallel on power hardware (VRAM ≥ 12 GB).
+    retrieval (vector/FTS/graph). Parallel on power/extreme hardware (VRAM ≥ 12 GB).
   - `SessionStart` — tiered injection: full handoff if < 30 min old, headline + MCP
     pointer if cold start. On compact: XML snapshot + SLM brief + retrieved engrams.
   - `Stop` — synthesizes working_context + headline via local SLM, writes handoff
-    YAML, updates knowledge graph, embeds high-value events to vector store
-- **Adapter registration** — `setup.ts` detects installed assistants and registers
-  hooks + MCP for each. Claude Code has full hook support; other assistants get MCP.
+    YAML, updates knowledge graph, bulk-embeds up to 50 high-value events to vector store
+- **Adapter setup** — `setup.ts` generates project-local hook + MCP snippets under
+  `.engram-cc/assistant-configs/`. No user-home config is mutated.
 - **SLM pipeline** — used for: compress() in precompact, embed() for vector store,
   working_context and headline synthesis in stop hook. Zero API calls for ECC processing.
 - **Tiered injection** (sessionstart.mjs):
@@ -95,13 +100,16 @@ When facts conflict, use:
 **SLM / compression:**
 - `src/compression/index.ts` — getCompressor() + getHardwareProfile() factories
 - `src/compression/detect.ts` — RAM/VRAM detection (nvidia-smi, rocm-smi, wmic); HardwareProfile
-- `src/compression/tier3.ts` — node-llama-cpp GGUF compressor (uses .engram-cc/models/)
+- `src/compression/tier3.ts` — node-llama-cpp GGUF compressor (uses the shared models dir from .engram-cc/config.json)
 - `src/compression/types.ts` — Compressor interface (compress, embed, isAvailable)
 
 **Engram retrieval (compaction recovery):**
 - `src/session/engram-retrieval.ts` — 4-path retrieval engine: vector, FTS5, graph BFS, anchor facts
 - `src/session/compact-brief.ts` — SLM-compressed brief generator for compaction recovery
 - `src/session/compact-budget.ts` — Dynamic token budget calculator (scales with compact_count)
+
+**Query expansion (PostToolUse FTS5 enrichment):**
+- `src/retrieval/query-expander.ts` — Gemma 3 1B FTS5 query expansion (standalone, not a Compressor)
 
 **Multi-assistant:**
 - `src/adapters/types.ts` — AssistantAdapter interface
@@ -126,7 +134,7 @@ No HTTP API. Entry points are AI assistant lifecycle hooks:
 
 | Hook | File | Fires when |
 |---|---|---|
-| UserPromptSubmit | posttooluse.mjs | User sends a message |
+| UserPromptSubmit | userpromptsubmit.mjs | User sends a message |
 | PostToolUse | posttooluse.mjs | Any tool completes |
 | PreCompact | precompact.mjs | Context window nears limit |
 | SessionStart | sessionstart.mjs | Session opens or resumes |
@@ -140,25 +148,27 @@ MCP tools (served via stdio to any connected assistant):
 | search | FTS5 full-text search over all session events |
 | recent | Most recent N session events, filterable by category |
 | graph_query | BFS traversal of the knowledge graph |
-| semantic_search | Vector similarity search over embedded session events (MiniLM) |
+| semantic_search | Vector similarity search over embedded session events (BGE-large/BGE-base/MiniLM per hardware profile) |
 
 ## 6. Security Baseline
 
 - No network surface — fully local operation
 - No credentials, tokens, or API keys in any config
-- DB and YAML files live in `~/.engram-cc/` — local user only
+- DB, YAML, logs, and setup snippets live in `<projectDir>/.engram-cc/`
+- Models live in the shared directory configured in `<projectDir>/.engram-cc/config.json`
 - `.ecc-id` contains only a UUID — not sensitive
 - No PII handling beyond project file paths in event data
 
 ## 7. Data Design Rules
 
 - **Project identity key**: UUID from `.ecc-id` (not a path hash — survives renames)
-- **Session DB**: `~/.engram-cc/sessions/<uuid>.db`
-- **Events file**: `~/.engram-cc/sessions/<uuid>-events.md`
-- **Cleanup flag**: `~/.engram-cc/sessions/<uuid>.cleanup`
+- **Session DB**: `<projectDir>/.engram-cc/sessions/<uuid>.db`
+- **Events file**: `<projectDir>/.engram-cc/sessions/<uuid>-events.md`
+- **Cleanup flag**: `<projectDir>/.engram-cc/sessions/<uuid>.cleanup`
 - **Handoff YAML**: `<projectDir>/.engram-cc/handoff.yaml`
 - **Working memory**: `<projectDir>/.engram-cc/working.yaml`
-- **GGUF models**: `~/.engram-cc/models/<model-file>.gguf`
+- **Project config**: `<projectDir>/.engram-cc/config.json`
+- **GGUF models**: `<sharedModelsDir>/<model-file>.gguf`
 - All timestamps: UTC ISO 8601
 - Event dedup: SHA256 hash on (session_id + type + data) — never store duplicates
 - FIFO eviction when episodic DB hits capacity
@@ -169,15 +179,19 @@ MCP tools (served via stdio to any connected assistant):
 
 Detected automatically at startup — cannot be forced via config.
 
-| Profile | Condition | Pipeline behavior |
-|---------|-----------|-------------------|
-| `minimal` | No GPU / VRAM < 4 GB | Sequential PreCompact, single model |
-| `standard` | VRAM 4–11 GB or RAM ≥ 16 GB | Sequential PreCompact, GPU-assisted |
-| `power` | VRAM ≥ 12 GB or Apple Silicon ≥ 16 GB | Parallel PreCompact (SLM + retrieval concurrent) |
+| Profile | VRAM condition | Apple Silicon | Embedding model | Pipeline |
+|---------|---------------|---------------|-----------------|----------|
+| `minimal` | No GPU / VRAM < 4 GB | < 8 GB | MiniLM-L6 (384-dim) | Sequential |
+| `standard` | VRAM 4–11 GB or RAM ≥ 16 GB | 8–15 GB | BGE-base-en-v1.5 (768-dim) | Sequential |
+| `power` | VRAM 12–23 GB | 16–35 GB | BGE-large-en-v1.5 (768-dim) | Parallel (SLM+retrieval concurrent) |
+| `extreme` | VRAM ≥ 24 GB | ≥ 36 GB | BGE-large-en-v1.5 (768-dim) | Parallel (SLM+retrieval concurrent) |
+
+`power` and `extreme` use the same embedding model. The distinction matters for PreCompact
+parallelism (SLM on GPU + retrieval on CPU run concurrently) and future model tiers.
 
 Detection: `nvidia-smi` (NVIDIA), `rocm-smi` (AMD Linux), `wmic` (Windows vendor-agnostic), total RAM proxy (Apple Silicon). All calls are cached after first invocation and time out at 500ms.
 
-Disable subconscious retrieval (PostToolUse): `ENGRAM_SUBCONSCIOUS=0`
+Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
 
 ## 9. Known Mismatches / Technical Debt
 
@@ -204,6 +218,35 @@ Disable subconscious retrieval (PostToolUse): `ENGRAM_SUBCONSCIOUS=0`
   stop hook). SLM briefs are chain-aware from cycle 2 onward — each brief receives
   prior briefs as context. Benchmark: A11 in test-adversarial.mjs validates
   multi-compaction synthesis quality.
+- **Event archive for lifetime retention** — Fixed (2026-03-13). Events evicted from
+  the 1000-event live buffer are copied to `session_events_archive` (cap 50,000) before
+  deletion. Archive eviction removes NEWEST entries to preserve early-session anchors.
+  `searchEvents()` queries both `session_events_fts` and `session_events_archive_fts`
+  and merges results (archive results scored at 0.85x). PreCompact passes archive events
+  to `buildResumeSnapshot()` for `renderKeyTopics()`. Lifetime retention benchmark: 0% →
+  100% recall at cycle 100.
+- **tier3c (Gemma 3 4B) times out at 12+ compaction cycles** — The 60s SLM timeout fires during
+  marathon sessions. Gemma 3 4B is slower than Llama 3.2 3B at this task; at 12–20 cycle inputs
+  it exceeds the budget and PreCompact falls back to raw context. Gemma 3 4B is still viable for
+  short sessions (< 8 compaction cycles). Llama 3.2 3B is the recommended tier3 model for
+  marathon session users.
+- **tier3b (Qwen3.5 4B) diff-mode unstable** — Falls back from grammar-constrained JSON to prose
+  at 8+ compaction cycles. Output is still correct but unstructured; downstream fields relying on
+  strict JSON schema (task_status enum, decisions[].status) may not parse. Prose fallback is safe
+  for the working_context field but reduces handoff YAML structure quality.
+- **A11 multi-compaction chain synthesis gap** — All three production SLM models (Llama 3.2 3B,
+  Qwen3.5 4B, Gemma 3 4B) score 10/11 on the adversarial suite. A11 requires the model to
+  synthesize facts distributed across 3 separate compaction briefs. All models focus on the most
+  recent brief and drop earlier chains. Mitigation: FTS5 archive and vector retrieval still hold
+  those facts on-demand; the gap is in the SLM brief's in-context compression, not in retrieval.
+  The test was added after the "10/10" claim and reflects the true production score.
+- **Embedding specialist models** — Implemented (2026-03-13). Tier 2 now selects the
+  embedding model based on hardware profile: extreme/power → BGE-large-en-v1.5 (768-dim),
+  standard → BGE-base-en-v1.5 (768-dim), minimal → MiniLM-L6-v2 (384-dim). VectorDB
+  auto-detects stored dimensions on open and transparently recreates the table on model
+  upgrade. Live continuous indexing added to PostToolUse (significant events indexed
+  immediately, not just at session end). Semantic retrieval added to UserPromptSubmit
+  (every user message triggers cosine search, relevant memories injected as context).
 
 ## 10. Related Contracts
 

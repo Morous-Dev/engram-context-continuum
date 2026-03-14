@@ -190,16 +190,21 @@ for (let cycle = 1; cycle <= TOTAL_CYCLES; cycle++) {
 
   // ── Build snapshot ─────────────────────────────────────────────────────────
   const snapshot = buildResumeSnapshot(cleanedEvents, { compactCount: cycle });
+  const resumeChain = db.getResumeChain(sessionId);
 
   // ── Generate SLM brief ─────────────────────────────────────────────────────
   let slmBrief = null;
+  let structuredHandoff = null;
   const briefStart = Date.now();
   try {
-    slmBrief = await generateCompactBrief(cleanedEvents, {
+    const result = await generateCompactBrief(cleanedEvents, {
       compactCount: cycle,
       sessionId,
       projectDir,
+      resumeChain,
     });
+    slmBrief = result.brief;
+    structuredHandoff = result.structured ? JSON.stringify(result.structured) : null;
   } catch (err) {
     console.error(`  SLM brief failed: ${err.message}`);
   }
@@ -222,6 +227,7 @@ for (let cycle = 1; cycle <= TOTAL_CYCLES; cycle++) {
 
   // ── Store resume for next cycle ────────────────────────────────────────────
   db.upsertResume(sessionId, snapshot, storedEvents.length, slmBrief);
+  db.appendResumeHistory(sessionId, cycle, snapshot, slmBrief, structuredHandoff, storedEvents.length);
   db.incrementCompactCount(sessionId);
 
   // ── Anchor fact assertions ─────────────────────────────────────────────────

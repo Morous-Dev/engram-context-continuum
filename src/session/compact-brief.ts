@@ -22,9 +22,9 @@
  * Depended on by: src/hooks/precompact.mjs.
  */
 
-import type { StoredEvent } from "./db.js";
+import type { StoredEvent, ResumeHistoryRow } from "./db.js";
 import type { StructuredHandoff } from "../compression/types.js";
-import { buildSynthesisInput } from "../handoff/writer.js";
+import { buildCarryForwardState, buildSynthesisInput } from "../handoff/writer.js";
 import { getCompressor } from "../compression/index.js";
 import { buildCompactBriefPrompt } from "../compression/schema.js";
 import { calculateCompactBudget } from "./compact-budget.js";
@@ -52,6 +52,13 @@ export interface CompactBriefOptions {
    * Omit or pass empty array for the first compaction of a session.
    */
   priorBriefs?: string[];
+  /** Full prior compaction chain, oldest first. Preferred over priorBriefs. */
+  resumeChain?: ResumeHistoryRow[];
+}
+
+export interface CompactBriefResult {
+  brief: string | null;
+  structured: StructuredHandoff | null;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -87,7 +94,12 @@ function extractSynthesisInputs(events: StoredEvent[]): {
     ),
   ];
 
-  const allErrors = errorEvents.map((e) => truncateString(e.data, 200));
+  const allErrors = errorEvents
+    .filter((e) => e.type !== "error_resolved")
+    .map((e) => truncateString(e.data, 200));
+  const errorsResolved = errorEvents
+    .filter((e) => e.type === "error_resolved")
+    .map((e) => truncateString(e.data, 200));
 
   const lastPromptEvent = promptEvents.at(-1);
   const currentTask = lastPromptEvent
@@ -106,7 +118,7 @@ function extractSynthesisInputs(events: StoredEvent[]): {
     decisionEvents,
     filesModified,
     allErrors,
-    errorsResolved: [],
+    errorsResolved,
     currentTask,
     lastAction,
   };
@@ -194,13 +206,19 @@ function formatProseBrief(prose: string): string {
 export async function generateCompactBrief(
   events: StoredEvent[],
   options: CompactBriefOptions,
-): Promise<string | null> {
-  if (events.length === 0) return null;
+): Promise<CompactBriefResult> {
+  if (events.length === 0) return { brief: null, structured: null };
 
   // Step 1-2: Build synthesis input from current-cycle events.
   // If prior briefs are present, pass them so the SLM synthesizes the full
   // session arc rather than an isolated snapshot of this cycle alone.
   const inputs = extractSynthesisInputs(events);
+  const priorCompactionBriefs = options.resumeChain
+    ? options.resumeChain
+      .map((row) => row.slm_brief ?? row.snapshot)
+      .filter(Boolean)
+    : (options.priorBriefs ?? []);
+  const carryForward = buildCarryForwardState(options.resumeChain);
   const synthesisInput = buildSynthesisInput(
     inputs.promptEvents,
     inputs.decisionEvents,
@@ -209,10 +227,11 @@ export async function generateCompactBrief(
     inputs.errorsResolved,
     inputs.currentTask,
     inputs.lastAction,
-    options.priorBriefs,
+    priorCompactionBriefs,
+    carryForward,
   );
 
-  if (!synthesisInput.trim()) return null;
+  if (!synthesisInput.trim()) return { brief: null, structured: null };
 
   // Step 3: Calculate dynamic compression ratio
   // Preprocessing (code block/stack trace stripping) is handled internally
@@ -224,13 +243,15 @@ export async function generateCompactBrief(
 
   // Tier 1 (rule-based) and tier 2 (encoder-only, delegates to tier1) can't
   // synthesize — not worth running for compact brief
-  if (compressor.tier === "tier1" || compressor.tier === "tier2") return null;
+  if (compressor.tier === "tier1" || compressor.tier === "tier2") {
+    return { brief: null, structured: null };
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), SLM_TIMEOUT_MS);
 
   try {
-    const result = await Promise.race([
+      const result = await Promise.race([
       compressor.compress(synthesisInput, budget.compressionRatio, buildCompactBriefPrompt),
       new Promise<never>((_, reject) => {
         controller.signal.addEventListener("abort", () =>
@@ -244,15 +265,15 @@ export async function generateCompactBrief(
     // Step 6: Format result as XML
     if (result.format === "json" && result.structured) {
       const brief = formatStructuredBrief(result.structured);
-      if (brief.length > 50) return brief;
+      if (brief.length > 50) return { brief, structured: result.structured };
     } else if (result.compressed.trim()) {
       const brief = formatProseBrief(result.compressed.trim());
-      if (brief.length > 50) return brief;
+      if (brief.length > 50) return { brief, structured: null };
     }
 
-    return null;
+    return { brief: null, structured: null };
   } catch {
     clearTimeout(timeout);
-    return null;
+    return { brief: null, structured: null };
   }
 }

@@ -13,9 +13,16 @@
 
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { getBenchmarkModelsDir } from './models-dir.mjs';
 
-const MODELS_DIR = join(homedir(), '.engram-cc', 'models');
+const MODELS_DIR = (() => {
+  try {
+    return getBenchmarkModelsDir();
+  } catch (error) {
+    console.error(`\n  ${error.message}`);
+    process.exit(1);
+  }
+})();
 
 const HANDOFF_SCHEMA = {
   type: "object",
@@ -99,8 +106,8 @@ const MODELS = [
   },
   {
     id: 'qwen',
-    label: 'Qwen 3.5 2B',
-    file: 'qwen3.5-2b-q5_k_m.gguf',
+    label: 'Qwen 3.5 4B',
+    file: 'Qwen3.5-4B-Q4_K_M.gguf',
     noThink: true,
     ctxOpts: { contextSize: 4096, ignoreMemorySafetyChecks: true },
   },

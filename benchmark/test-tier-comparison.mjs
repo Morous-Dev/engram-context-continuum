@@ -36,10 +36,19 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { seed } from "./seed-helpers.mjs";
 import { generateCycleEvents, estimateTokens } from "./marathon-data.mjs";
+import { getBenchmarkModelsDir } from "./models-dir.mjs";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const BUILD = join(process.cwd(), "build");
+const MODELS_DIR = (() => {
+  try {
+    return getBenchmarkModelsDir();
+  } catch (error) {
+    console.error(`\n  ${error.message}`);
+    process.exit(1);
+  }
+})();
 const COMPACTION_LEVELS = [4, 8, 12, 16, 20];
 /** Assertions per level: 7 for levels < 9, 8 for levels >= 9 (AF3 reappearance check) */
 const ASSERT_TOTAL = (level) => (level >= 9 ? 8 : 7);
@@ -110,7 +119,14 @@ async function runBriefWithTier(compressor, cleanedEvents, compactCount) {
         .map((e) => e.data),
     ),
   ];
-  const allErrors = errorEvents.map((e) => truncateString(e.data, 200));
+  // Mirror compact-brief.ts: unresolved errors feed the active errors section,
+  // while resolved errors are passed separately for the synthesis prompt.
+  const allErrors = errorEvents
+    .filter((e) => e.type !== "error_resolved")
+    .map((e) => truncateString(e.data, 200));
+  const errorsResolved = errorEvents
+    .filter((e) => e.type === "error_resolved")
+    .map((e) => truncateString(e.data, 200));
   const lastPrompt = promptEvents.at(-1);
   const currentTask = lastPrompt ? truncateString(lastPrompt.data, 300) : "";
   const lastFile = fileEvents.filter((e) => e.type === "file_write" || e.type === "file_edit").at(-1);
@@ -119,7 +135,7 @@ async function runBriefWithTier(compressor, cleanedEvents, compactCount) {
     : "";
 
   const synthesisInput = buildSynthesisInput(
-    promptEvents, decisionEvents, filesModified, allErrors, [], currentTask, lastAction,
+    promptEvents, decisionEvents, filesModified, allErrors, errorsResolved, currentTask, lastAction,
   );
   if (!synthesisInput.trim()) return null;
 
@@ -184,8 +200,23 @@ async function runBriefWithTier(compressor, cleanedEvents, compactCount) {
  * @param tierName - Tier label for failure messages.
  * @returns Assertion result object.
  */
-function runAssertions(context, level, tierName) {
+function claimsRecurringLeakResolved(text) {
+  const lower = text.toLowerCase();
+  const claimsResolved =
+    lower.includes("memory leak resolved") ||
+    lower.includes("leak fixed");
+  const mentionsReappearance =
+    lower.includes("reappear") ||
+    lower.includes("still unresolved") ||
+    lower.includes("unresolved") ||
+    lower.includes("not yet implemented") ||
+    lower.includes("not implemented");
+  return claimsResolved && !mentionsReappearance;
+}
+
+function runAssertions(context, level, tierName, brief) {
   const lower = context.toLowerCase();
+  const briefLower = (brief ?? context).toLowerCase();
   let passed = 0;
   let failed = 0;
   const failures = [];
@@ -215,7 +246,7 @@ function runAssertions(context, level, tierName) {
 
   // AF3: Leak NOT claimed resolved (cycle 9+ — reappeared at cycle 8)
   if (level >= 9) {
-    check(!lower.includes("memory leak resolved"), "AF3: WebSocket leak NOT claimed as resolved (reappeared)");
+    check(!claimsRecurringLeakResolved(briefLower), "AF3: WebSocket leak NOT claimed as resolved (reappeared)");
   }
 
   // AF4: shared/ directory (cycle 3+)
@@ -251,7 +282,7 @@ for (const t of ALL_TIERS) {
 }
 
 if (availableTiers.length === 0) {
-  console.error("\n  No SLM tiers available. Install at least one model in ~/.engram-cc/models/");
+  console.error(`\n  No SLM tiers available. Install at least one model in the configured shared models directory:\n  ${MODELS_DIR}`);
   process.exit(1);
 }
 
@@ -310,7 +341,7 @@ for (const level of COMPACTION_LEVELS) {
       console.log(`  Brief: failed/null — using raw context for assertions`);
     }
 
-    const assertions = runAssertions(fullContext, level, name);
+    const assertions = runAssertions(fullContext, level, name, brief);
     const total = ASSERT_TOTAL(level);
 
     console.log(`  Anchor facts: ${assertions.passed}/${total}`);
@@ -446,6 +477,12 @@ for (const n of sorted) {
 }
 
 console.log("\n" + "═".repeat(76) + "\n");
+
+// Dispose compressor instances before exit — releases VRAM/RAM held by node-llama-cpp.
+// process.exit() would terminate without giving the GPU driver a chance to clean up.
+for (const { compressor } of ALL_TIERS) {
+  try { await compressor.dispose(); } catch { /* ignore — disposal is best-effort */ }
+}
 
 const anyFailed = allFailures.length > 0;
 process.exit(anyFailed ? 1 : 0);

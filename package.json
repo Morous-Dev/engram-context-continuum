@@ -19,7 +19,19 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf build",
     "setup": "npm run build && node build/cli/setup.js",
-    "postinstall": "node build/cli/setup.js --yes || true"
+    "postinstall": "node -e \"console.log('EngramCC postinstall: skipped automatic setup. Run engramcc inside your project folder to initialize local .engram-cc/.')\"",
+    "test": "node benchmark/test-session-db.mjs && node benchmark/test-extract.mjs && node benchmark/test-snapshot.mjs && node benchmark/test-fts5.mjs",
+    "test:quality": "node benchmark/run.mjs",
+    "test:lifetime": "node benchmark/test-lifetime-retention.mjs",
+    "test:calibrate": "node benchmark/test-extract-real-decisions.mjs",
+    "test:calibrate:quick": "node benchmark/test-extract-real-decisions.mjs --quick",
+    "test:calibrate:verbose": "node benchmark/test-extract-real-decisions.mjs --verbose",
+    "test:brutal": "node benchmark/test-extract-brutal.mjs",
+    "test:brutal:quick": "node benchmark/test-extract-brutal.mjs --quick",
+    "test:brutal:verbose": "node benchmark/test-extract-brutal.mjs --verbose",
+    "test:lifecycle": "node benchmark/test-lifecycle-real.mjs",
+    "test:lifecycle:quick": "node benchmark/test-lifecycle-real.mjs --quick",
+    "test:lifecycle:verbose": "node benchmark/test-lifecycle-real.mjs --quick --verbose"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -29,7 +29,7 @@
 
 import { join } from 'node:path';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
 import { writeFileSync } from 'node:fs';
@@ -87,7 +87,7 @@ writeFileSync(
 );
 
 // ── Seed events ───────────────────────────────────────────────────────────────
-const dbDir  = join(homedir(), '.engram-cc', 'sessions');
+const dbDir  = join(PROJECT_DIR, '.engram-cc', 'sessions');
 mkdirSync(dbDir, { recursive: true });
 const dbPath = join(dbDir, 'bench-s03.db');
 if (existsSync(dbPath)) rmSync(dbPath);

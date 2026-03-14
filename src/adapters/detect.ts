@@ -2,16 +2,14 @@
  * detect.ts — Utilities for detecting installed AI coding assistants.
  *
  * What this file is: shared detection helpers used by every assistant adapter.
- * Responsible for: checking for binary presence, config directories, and
- *   platform-specific install paths.
- * Depends on: node:child_process, node:fs, node:path, node:os.
+ * Responsible for: checking for binary presence only. ECC local-only mode
+ * does not inspect or mutate user-profile config directories outside the repo.
+ * Depends on: node:child_process, node:os.
  * Depended on by: all adapter files in src/adapters/.
  */
 
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 
 /**
  * Check whether a CLI command exists in PATH.
@@ -30,55 +28,36 @@ export function commandExists(cmd: string): boolean {
   }
 }
 
-/**
- * Check whether a directory exists at the given path.
- *
- * @param path - Absolute path to check.
- */
-export function dirExists(path: string): boolean {
-  return existsSync(path);
-}
-
 // ── Per-assistant detection ──────────────────────────────────────────────────
 
 /** Returns true if Gemini CLI is installed. */
 export function isGeminiInstalled(): boolean {
-  return dirExists(join(homedir(), ".gemini")) || commandExists("gemini");
+  return commandExists("gemini");
 }
 
 /** Returns true if VS Code with Copilot is likely installed. */
 export function isVSCodeInstalled(): boolean {
-  const vscodeDataDirs = [
-    join(homedir(), "AppData", "Roaming", "Code", "User"),    // Windows
-    join(homedir(), "Library", "Application Support", "Code", "User"), // macOS
-    join(homedir(), ".config", "Code", "User"),                // Linux
-    join(homedir(), ".vscode"),                                // fallback
-  ];
-  return vscodeDataDirs.some(dirExists) || commandExists("code");
+  return commandExists("code");
 }
 
 /** Returns true if Codex CLI is installed. */
 export function isCodexInstalled(): boolean {
-  return dirExists(join(homedir(), ".codex")) || commandExists("codex");
+  return commandExists("codex");
+}
+
+/** Returns true if Kilo CLI is installed. */
+export function isKiloInstalled(): boolean {
+  return commandExists("kilo");
 }
 
 /** Returns true if OpenCode is installed. */
 export function isOpenCodeInstalled(): boolean {
-  return (
-    dirExists(join(homedir(), ".config", "opencode")) ||
-    dirExists(join(homedir(), ".opencode")) ||
-    commandExists("opencode")
-  );
+  return commandExists("opencode");
 }
 
 /** Returns true if Cursor is installed. */
 export function isCursorInstalled(): boolean {
-  const cursorDirs = [
-    join(homedir(), ".cursor"),
-    join(homedir(), "AppData", "Roaming", "Cursor", "User"), // Windows
-    join(homedir(), "Library", "Application Support", "Cursor", "User"), // macOS
-  ];
-  return cursorDirs.some(dirExists) || commandExists("cursor");
+  return commandExists("cursor");
 }
 
 /**
@@ -86,12 +65,7 @@ export function isCursorInstalled(): boolean {
  * Returns null if not found.
  */
 export function getVSCodeUserDir(): string | null {
-  const candidates = [
-    join(homedir(), "AppData", "Roaming", "Code", "User"),
-    join(homedir(), "Library", "Application Support", "Code", "User"),
-    join(homedir(), ".config", "Code", "User"),
-  ];
-  return candidates.find(dirExists) ?? null;
+  return null;
 }
 
 /**
@@ -99,10 +73,5 @@ export function getVSCodeUserDir(): string | null {
  * Returns null if not found.
  */
 export function getCursorUserDir(): string | null {
-  const candidates = [
-    join(homedir(), ".cursor"),
-    join(homedir(), "AppData", "Roaming", "Cursor", "User"),
-    join(homedir(), "Library", "Application Support", "Cursor", "User"),
-  ];
-  return candidates.find(dirExists) ?? null;
+  return null;
 }

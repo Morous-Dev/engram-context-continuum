@@ -24,3 +24,7 @@ C:/Temp/
 
 # Benchmark output logs
 benchmark/*.txt
+
+# Local dev artifacts
+repos/
+tmp-shared-models/

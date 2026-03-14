@@ -14,7 +14,8 @@
  *
  * Usage (added automatically by setup CLI):
  *   Claude Code:  { "command": "node", "args": ["/path/to/build/mcp/server.js"] }
- *   Gemini CLI:   same pattern in ~/.gemini/settings.json mcp section
+ *   Gemini CLI:   same pattern in the generated local snippet under
+ *                 .engram-cc/assistant-configs/gemini-cli/mcp.json
  *   VS Code:      same pattern in mcp.json
  *
  * IMPORTANT: Never write to stdout except via the MCP SDK transport.
@@ -36,7 +37,7 @@ import type { HandoffData } from "../handoff/writer.js";
 
 /**
  * Compute the SQLite DB path for a project using stable project UUID.
- * Delegates to getProjectDBPath() — path: ~/.engram-cc/sessions/<uuid>.db
+ * Delegates to getProjectDBPath() — path: <projectDir>/.engram-cc/sessions/<uuid>.db
  *
  * @param projectDir - Absolute path to the project directory.
  * @returns Absolute path to the project's SQLite DB file.
@@ -218,10 +219,14 @@ server.tool(
         data: string;
         created_at: string;
         session_id: string;
+        source_assistant: string;
+        source_kind: string;
+        source_confidence: string;
       }
 
       const rows = db.prepare<[string, number], EventRow>(`
-        SELECT e.type, e.category, e.data, e.created_at, e.session_id
+        SELECT e.type, e.category, e.data, e.created_at, e.session_id,
+               e.source_assistant, e.source_kind, e.source_confidence
         FROM session_events e
         JOIN session_events_fts fts ON e.id = fts.rowid
         WHERE session_events_fts MATCH ?
@@ -229,13 +234,45 @@ server.tool(
         LIMIT ?
       `).all(query, limit);
 
-      if (!rows.length) {
+      // Also search archive for evicted events
+      let archiveRows: EventRow[] = [];
+      try {
+        const hasArchiveFts = db.prepare(
+          `SELECT name FROM sqlite_master WHERE type='table' AND name='session_events_archive_fts'`,
+        ).get();
+        if (hasArchiveFts) {
+          archiveRows = db.prepare<[string, number], EventRow>(`
+            SELECT a.type, a.category, a.data, a.created_at, a.session_id,
+                   a.source_assistant, a.source_kind, a.source_confidence
+            FROM session_events_archive a
+            JOIN session_events_archive_fts fts ON a.id = fts.rowid
+            WHERE session_events_archive_fts MATCH ?
+            ORDER BY a.created_at DESC
+            LIMIT ?
+          `).all(query, limit);
+        }
+      } catch { /* older DB without archive */ }
+
+      // Merge live + archive, deduplicate by content prefix
+      const seen = new Set<string>();
+      const finalRows: EventRow[] = [];
+      for (const r of [...rows, ...archiveRows]) {
+        const key = r.data.slice(0, 200);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        finalRows.push(r);
+      }
+      const resultRows = finalRows.slice(0, limit);
+
+      if (!resultRows.length) {
         return { content: [{ type: "text", text: `No results for: "${query}"` }] };
       }
 
-      const lines = [`# Search results for "${query}" (${rows.length} found)\n`];
-      for (const row of rows) {
-        lines.push(`**[${row.category}/${row.type}]** ${row.created_at.slice(0, 19)}`);
+      const lines = [`# Search results for "${query}" (${resultRows.length} found)\n`];
+      for (const row of resultRows) {
+        lines.push(
+          `**[${row.category}/${row.type}]** ${row.created_at.slice(0, 19)} (${row.source_assistant}/${row.source_kind}/${row.source_confidence})`,
+        );
         lines.push(`  ${row.data.slice(0, 300)}`);
         lines.push("");
       }
@@ -281,16 +318,19 @@ server.tool(
         category: string;
         data: string;
         created_at: string;
+        source_assistant: string;
+        source_kind: string;
+        source_confidence: string;
       }
 
       const rows = category
         ? db.prepare<[string, number], EventRow>(`
-            SELECT type, category, data, created_at FROM session_events
+            SELECT type, category, data, created_at, source_assistant, source_kind, source_confidence FROM session_events
             WHERE category = ?
             ORDER BY created_at DESC LIMIT ?
           `).all(category, limit)
         : db.prepare<[number], EventRow>(`
-            SELECT type, category, data, created_at FROM session_events
+            SELECT type, category, data, created_at, source_assistant, source_kind, source_confidence FROM session_events
             ORDER BY created_at DESC LIMIT ?
           `).all(limit);
 
@@ -300,7 +340,9 @@ server.tool(
 
       const lines = [`# Recent events — ${dir}\n`];
       for (const row of rows) {
-        lines.push(`**${row.created_at.slice(0, 19)}** [${row.category}/${row.type}]`);
+        lines.push(
+          `**${row.created_at.slice(0, 19)}** [${row.category}/${row.type}] (${row.source_assistant}/${row.source_kind}/${row.source_confidence})`,
+        );
         lines.push(`  ${row.data.slice(0, 200)}`);
         lines.push("");
       }
