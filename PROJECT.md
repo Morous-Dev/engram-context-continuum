@@ -1,7 +1,7 @@
 # Engram Context Continuum (EngramCC) — Project Context
 
 Last verified: 2026-03-14
-This file is the project-specific companion to CLAUDE.md.
+This file is the project-specific companion to AGENTS.md.
 Code and migrations win over this file when facts conflict.
 
 ## 0. Stack
@@ -44,7 +44,7 @@ When facts conflict, use:
 2. Database schema (src/session/db.ts)
 3. README.md
 4. This file (PROJECT.md)
-5. CLAUDE.md
+5. AGENTS.md
 
 ## 3. Runtime Snapshot
 
@@ -254,7 +254,7 @@ Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
 
 ## 10. Related Contracts
 
-- `CLAUDE.md` — universal co-developer standard (this project follows it)
+- `AGENTS.md` — repository collaboration contract for AI assistants and contributors
 - `ADAPTER-AUTHORING.md` — rules for adding new assistant adapters safely
 - `src/hooks/README.md` — hook system documentation
 - `src/adapters/` — each adapter has inline documentation of its config file format

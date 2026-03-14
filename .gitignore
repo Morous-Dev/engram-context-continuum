@@ -17,6 +17,9 @@ C:/Temp/
 .ecc-id
 .engram-cc/
 
+# Local-only co-developer standard (AGENTS.md is the tracked public version)
+CLAUDE.md
+
 # Assistant local state/config (machine-specific)
 .gemini/
 .kilocode/

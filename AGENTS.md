@@ -1,7 +1,8 @@
-# Claude Co-Developer Standard
+# AI Co-Developer Standard
 
-This file defines mandatory behavior for Claude (and any AI coding assistant) on any project.
-It is the universal standard. Project-specific rules live in `PROJECT.md`.
+This file defines mandatory behavior for any AI coding assistant working on this project
+(Claude Code, Codex CLI, Gemini CLI, Cursor, OpenCode, etc.).
+Project-specific rules live in `PROJECT.md`.
 
 If this file conflicts with `PROJECT.md` — `PROJECT.md` wins for project-specific facts.
 If this file conflicts with code or migrations — code and migrations win.
@@ -29,7 +30,7 @@ When creating `PROJECT.md` for a new project, use this structure:
 # [Project Name] — Project Context
 
 Last verified: [date]
-This file is the project-specific companion to CLAUDE.md.
+This file is the project-specific companion to AGENTS.md.
 Code and migrations win over this file when facts conflict.
 
 ## 0. Stack
@@ -50,7 +51,7 @@ When facts conflict, use:
 2. Database migrations
 3. README.md
 4. This file (PROJECT.md)
-5. CLAUDE.md
+5. AGENTS.md
 
 ## 3. Runtime Snapshot
 - Auth flow (if applicable)
@@ -258,7 +259,7 @@ Every meaningful folder must have a `README.md` containing:
 
 If behavior, contracts, security, or process changed — update docs in the same session:
 1. `PROJECT.md` — if stack, runtime, or architecture changed
-2. `CLAUDE.md` — if a universal rule needs updating (rare)
+2. `AGENTS.md` — if a universal rule needs updating (rare)
 3. `README.md` — if setup, usage, or runbook changed
 4. Any roadmap or product doc if direction changed
 
