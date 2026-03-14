@@ -34,6 +34,7 @@ C:/Temp/
 *.key
 *.p12
 .mcpregistry_*
+server.json
 
 # Benchmark output logs
 benchmark/*.txt
