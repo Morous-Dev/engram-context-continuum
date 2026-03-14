@@ -412,4 +412,6 @@ src/
 
 ## License
 
-Elastic License 2.0 — free to use for internal tooling; contact for redistribution or hosted use.
+**Open source:** [AGPL-3.0](LICENSE) — free to use, modify, and distribute as long as derivative works are also open source under AGPL-3.0.
+
+**Commercial:** A proprietary license is available for teams that need to use EngramCC in closed-source products or hosted services without AGPL obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) for details.
