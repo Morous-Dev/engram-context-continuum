@@ -1,6 +1,6 @@
 {
   "name": "@morous-dev/engram-cc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.Morous-Dev/engram-cc",
   "type": "module",
   "description": "Engram Context Continuum (EngramCC) — universal AI coding assistant memory: session handoff, multi-tier memory bank, smart compaction, and bundled AI compression. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI, and Cursor.",

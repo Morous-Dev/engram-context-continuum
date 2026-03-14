@@ -4,9 +4,6 @@ node_modules/
 # Build output
 build/
 
-# GGUF models (large binary files)
-.engram-cc/
-
 # Misc
 *.log
 .DS_Store
@@ -18,9 +15,25 @@ C:/Temp/
 
 # ECC local state (not source code)
 .ecc-id
+.engram-cc/
+
+# Assistant local state/config (machine-specific)
+.gemini/
+.kilocode/
+.codex/
+.cursor/
+.opencode/
+.vscode/
+.claude/settings*.json
 
 # Sensitive/local config overrides
 .claude/settings.local.json
+.env
+.env.*
+*.pem
+*.key
+*.p12
+.mcpregistry_*
 
 # Benchmark output logs
 benchmark/*.txt
@@ -28,3 +41,22 @@ benchmark/*.txt
 # Local dev artifacts
 repos/
 tmp-shared-models/
+PLAN.md
+PLAN-*.md
+SESSION-HANDOFF.md
+ARCHITECTURE-REFACTOR-PLAN.md
+bun.lock
+
+# Personal Claude skills and session state
+.claude/Skills/
+.claude/super-context/
+
+# Local databases and runtime artifacts
+*.db
+*.db-wal
+*.db-shm
+*.cleanup
+*-events.md
+
+# Local model binaries
+*.gguf
