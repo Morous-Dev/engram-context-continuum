@@ -176,6 +176,80 @@ server.tool(
   },
 );
 
+// ── MCP search query preprocessor ────────────────────────────────────────────
+
+/**
+ * Stop-words removed from MCP search queries before FTS5 matching.
+ * Question words and auxiliaries appear in user queries ("What did we decide
+ * about auth?") but almost never in event text, so AND-joining them returns
+ * zero results. Stripped before building the tiered FTS5 query.
+ */
+const SEARCH_STOP_WORDS = new Set([
+  // Question words
+  "what", "when", "where", "who", "whom", "which", "why", "how",
+  // Auxiliary verbs
+  "did", "do", "does", "is", "are", "was", "were", "has", "have", "had",
+  "will", "would", "could", "should", "can", "may", "might",
+  // Articles + common fillers
+  "the", "a", "an", "of", "in", "to", "for", "on", "at", "by",
+  "from", "with", "about", "into", "that", "this", "we", "our", "us",
+]);
+
+/**
+ * Build a tiered FTS5 query from a raw natural-language search string.
+ *
+ * Natural-language queries from assistants include question words and
+ * auxiliary verbs ("When did we decide about auth?") that never appear in
+ * stored event text, causing FTS5 AND-matching to return zero results.
+ *
+ * This function strips stop-words, then tries three increasingly relaxed
+ * AND-joined query tiers before falling back to OR-join (broad recall):
+ *
+ *   strict  — top 4 content terms AND-joined
+ *   relaxed — top 3 content terms AND-joined (if strict returns nothing)
+ *   minimal — top 2 content terms AND-joined (if relaxed returns nothing)
+ *   broad   — all terms OR-joined (last resort, used by caller)
+ *
+ * If the raw query is already valid FTS5 (contains AND/OR/NOT/"phrase"),
+ * it is returned as-is so power users retain full FTS5 syntax control.
+ *
+ * @param raw - Raw user query string
+ * @returns Object with strict/relaxed/minimal/broad tier strings and
+ *   isFts5Syntax flag indicating the raw query should be passed through.
+ */
+function buildSearchQuery(raw: string): {
+  strict: string;
+  relaxed: string;
+  minimal: string;
+  broad: string;
+  isFts5Syntax: boolean;
+} {
+  const trimmed = raw.trim();
+
+  // Pass through explicit FTS5 syntax (contains operators or phrase quotes)
+  if (/\b(AND|OR|NOT)\b|"/.test(trimmed)) {
+    return { strict: trimmed, relaxed: trimmed, minimal: trimmed, broad: trimmed, isFts5Syntax: true };
+  }
+
+  const terms = trimmed
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(t => t.length >= 3 && !SEARCH_STOP_WORDS.has(t));
+
+  if (terms.length === 0) {
+    // Nothing useful after filtering — pass the original through unchanged.
+    return { strict: trimmed, relaxed: trimmed, minimal: trimmed, broad: trimmed, isFts5Syntax: true };
+  }
+
+  const strict  = terms.slice(0, 4).join(" ");
+  const relaxed = terms.slice(0, 3).join(" ");
+  const minimal = terms.slice(0, 2).join(" ");
+  const broad   = terms.join(" OR ");
+
+  return { strict, relaxed, minimal, broad, isFts5Syntax: false };
+}
+
 // ── Tool: search ─────────────────────────────────────────────────────────────
 
 /**
@@ -228,7 +302,13 @@ server.tool(
         source_confidence: string;
       }
 
-      const rows = db.prepare<[string, number], EventRow>(`
+      // Build tiered FTS5 query from the raw user input.
+      // Natural-language queries contain question words and auxiliaries that
+      // never appear in event text, causing AND-match to return zero results.
+      // The tiered approach tries strict→relaxed→minimal AND-joins, then falls
+      // back to OR-join for maximum recall before giving up.
+      const searchTiers = buildSearchQuery(query);
+      const searchLive = db.prepare<[string, number], EventRow>(`
         SELECT e.type, e.category, e.data, e.created_at, e.session_id,
                e.source_assistant, e.source_kind, e.source_confidence
         FROM session_events e
@@ -236,16 +316,27 @@ server.tool(
         WHERE session_events_fts MATCH ?
         ORDER BY e.created_at DESC
         LIMIT ?
-      `).all(query, limit);
+      `);
 
-      // Also search archive for evicted events
+      let rows: EventRow[] = searchLive.all(searchTiers.strict, limit);
+      if (!rows.length && !searchTiers.isFts5Syntax) {
+        rows = searchLive.all(searchTiers.relaxed, limit);
+      }
+      if (!rows.length && !searchTiers.isFts5Syntax) {
+        rows = searchLive.all(searchTiers.minimal, limit);
+      }
+      if (!rows.length && !searchTiers.isFts5Syntax) {
+        rows = searchLive.all(searchTiers.broad, limit);
+      }
+
+      // Also search archive for evicted events (same tiered strategy)
       let archiveRows: EventRow[] = [];
       try {
         const hasArchiveFts = db.prepare(
           `SELECT name FROM sqlite_master WHERE type='table' AND name='session_events_archive_fts'`,
         ).get();
         if (hasArchiveFts) {
-          archiveRows = db.prepare<[string, number], EventRow>(`
+          const searchArchive = db.prepare<[string, number], EventRow>(`
             SELECT a.type, a.category, a.data, a.created_at, a.session_id,
                    a.source_assistant, a.source_kind, a.source_confidence
             FROM session_events_archive a
@@ -253,7 +344,15 @@ server.tool(
             WHERE session_events_archive_fts MATCH ?
             ORDER BY a.created_at DESC
             LIMIT ?
-          `).all(query, limit);
+          `);
+
+          archiveRows = searchArchive.all(searchTiers.strict, limit);
+          if (!archiveRows.length && !searchTiers.isFts5Syntax) {
+            archiveRows = searchArchive.all(searchTiers.relaxed, limit);
+          }
+          if (!archiveRows.length && !searchTiers.isFts5Syntax) {
+            archiveRows = searchArchive.all(searchTiers.broad, limit);
+          }
         }
       } catch { /* older DB without archive */ }
 
