@@ -47,6 +47,7 @@ repos/
 tmp-shared-models/
 PLAN.md
 PLAN-*.md
+LOCOMO-OPTIMIZATION-PLAN.md
 SESSION-HANDOFF.md
 ARCHITECTURE-REFACTOR-PLAN.md
 bun.lock
