@@ -1,5 +1,7 @@
 # Engram Context Continuum
 
+[![Support EngramCC](https://img.shields.io/badge/Support_EngramCC-Pay_What_You_Want-yellow?style=for-the-badge)](https://morous-dev.lemonsqueezy.com/checkout/buy/d10e8ab1-7616-433b-9c69-4ccb13edbdc0)
+
 **Universal AI session memory substrate.** One install. Every AI coding assistant. Persistent context across sessions, folder renames, and tool switches.
 
 > *In neuroscience, an engram is the physical trace a memory leaves in the brain. EngramCC does the same for AI — a local memory substrate that persists what your AI assistant learned, decided, and did, so the next session picks up exactly where the last one left off.*
@@ -416,8 +418,3 @@ src/
 
 **Commercial:** A proprietary license is available for teams that need to use EngramCC in closed-source products or hosted services without AGPL obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) for details.
 
----
-
-## Support
-
-If EngramCC saves you time, [support the project](https://morous-dev.lemonsqueezy.com/checkout/buy/d10e8ab1-7616-433b-9c69-4ccb13edbdc0) — pay what you want, starting at $5.
