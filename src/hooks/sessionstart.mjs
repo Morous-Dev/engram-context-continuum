@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "./suppress-stderr.mjs";
 /**
- * sessionstart.mjs — SessionStart hook for super-context session continuity.
+ * sessionstart.mjs — SessionStart hook for engram-cc session continuity.
  *
  * Responsible for: injecting session knowledge into the assistant context at the
  * start of every session or after a compact event. Also loads the YAML handoff
@@ -43,6 +43,14 @@ function escapeXML(s) {
     .replace(/'/g, "&apos;");
 }
 
+function buildCodexTurnPolicy() {
+  return [
+    '<engram_turn_policy assistant="codex">',
+    "On each new user message, if the answer depends on earlier project context that is not fully visible in the current turn, query engram-cc MCP first (recall, search, recent, graph_query). Prefer EngramCC over asking the user to repeat prior context.",
+    "</engram_turn_policy>",
+  ].join("\n");
+}
+
 const HOOK_DIR = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(HOOK_DIR, "..", "..");
 const BUILD_SESSION = join(PROJECT_ROOT, "build", "session");
@@ -55,6 +63,7 @@ try {
   const raw = await readStdin();
   const input = JSON.parse(raw);
   const source = input.source ?? "startup";
+  const assistant = (process.env.ENGRAM_ASSISTANT ?? "unknown").trim().toLowerCase();
 
   if (source === "compact") {
     // Session was compacted — inject resume snapshot + session knowledge
@@ -197,6 +206,10 @@ try {
     }
   }
   // "clear" — no action needed
+
+  if (assistant === "codex") {
+    additionalContext += "\n" + buildCodexTurnPolicy();
+  }
 
 } catch (err) {
   // Session continuity is best-effort — never block session start

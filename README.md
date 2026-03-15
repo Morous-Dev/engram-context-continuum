@@ -26,6 +26,26 @@ Run it from the project root you want ECC to manage, or pass `--project-dir <pat
 
 The setup CLI detects your hardware, prepares a project-local `.engram-cc/` workspace, asks for a shared models directory, and generates assistant hook/MCP snippets under `.engram-cc/assistant-configs/`. No user-home config is modified.
 
+### Canonical MCP Install Command
+
+For assistants that self-install MCP servers from npm, the canonical EngramCC command is:
+
+```bash
+npx --yes --package=@morous-dev/engram-cc -- engramcc-mcp
+```
+
+Equivalent `npm exec` form:
+
+```bash
+npm exec --yes --package=@morous-dev/engram-cc -- engramcc-mcp
+```
+
+Assistants should not guess `npx @morous-dev/engram-cc mcp`. Use the explicit package/bin form above.
+
+For project-local ECC setup, the generated snippets under `.engram-cc/assistant-configs/`
+intentionally use `node <project-local build/mcp/server.js>` instead. The `npx --package ...`
+form above is for assistants that install EngramCC directly from npm without running project-local setup first.
+
 ---
 
 ## Supported Assistants
@@ -35,12 +55,23 @@ The setup CLI detects your hardware, prepares a project-local `.engram-cc/` work
 | Claude Code | Full lifecycle hooks | recall / search / recent / graph_query |
 | Gemini CLI | Full lifecycle hooks | recall / search / recent / graph_query |
 | VS Code Copilot | — | recall / search / recent / graph_query |
-| Codex CLI | Partial hooks (`session_start`, `pre_tool_use`, `stop`) | recall / search / recent / graph_query |
+| Codex CLI | Native hooks (`session_start`, `pre_tool_use`, `stop`) + transcript-exact `user_prompt_submit` / `post_tool_use` + synthesized `pre_compact` | recall / search / recent / graph_query |
+| Kilo CLI | Wrapper-assisted only; native hooks not verified | recall / search / recent / graph_query |
 | OpenCode | Full lifecycle hooks | recall / search / recent / graph_query |
 | Cursor | — | recall / search / recent / graph_query |
 
 On Windows, generated hook snippets call `src/hooks/hook-runner.mjs` so assistant and
 project env vars are injected without brittle `cmd /C` quoting.
+
+Codex-specific note: the exact prompt/tool bridge reads Codex's own session JSONL under
+`CODEX_HOME` / `~/.codex/sessions/`, but ECC still writes its state only into the project-local
+`.engram-cc/` directory. Because Codex does not expose a true prompt-submit injection hook,
+startup context also includes a Codex turn policy that steers the assistant toward EngramCC
+MCP memory on user turns when earlier context may have compacted out.
+
+Kilo-specific note: current verified support is MCP plus the `ekilo` wrapper flow for
+session-start / session-stop continuity. Kilo has an open request for native lifecycle hooks,
+so ECC does not claim native Kilo hook parity yet.
 
 ---
 
@@ -201,7 +232,7 @@ The numbers below were verified against the current repo state on **March 14, 20
 | `node benchmark/test-session-db.mjs` | Session DB, archive, resume-chain, carry-forward regressions | ✅ **53/53** |
 | `npm run test:quality` | End-to-end handoff quality across S1/S2/S3 | ✅ **20/20** |
 | `node benchmark/test-hook-portability.mjs` | Cross-assistant hook env and startup portability | ✅ **14/14** |
-| `node benchmark/test-codex-adapter.mjs` | Codex translation + trigger + stop regressions | ✅ **17/17** |
+| `node benchmark/test-codex-adapter.mjs` | Codex transcript sync + trigger + stop regressions | ✅ **29/29** |
 | `npm run test:brutal:quick` | Real-data extraction calibration (WildChat + SWE-bench) | ✅ PASS |
 | `npm run test:lifecycle:quick` | 100-cycle real-data lifecycle / archive retention observation | ✅ PASS |
 | `node benchmark/test-adversarial.mjs --model llama3.2-3b` | Hostile SLM inputs A1–A11 | ✅ **11/11** |

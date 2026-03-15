@@ -19,7 +19,7 @@ export interface RegistrationResult {
   message: string;
 }
 
-export type CapabilityTier = "native" | "synthesized" | "unsupported";
+export type CapabilityTier = "native" | "transcript" | "synthesized" | "unsupported";
 
 export interface AdapterCapabilities {
   session_start: CapabilityTier;

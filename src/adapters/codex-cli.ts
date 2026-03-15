@@ -5,12 +5,13 @@
  * Responsible for: writing TOML examples under
  *   <projectDir>/.engram-cc/assistant-configs/codex-cli/. Codex uses
  *   snake_case event names in TOML format:
- *     session_start → sessionstart.mjs
- *     pre_tool_use  → codex-pretooluse.mjs (limited data — partial coverage only)
- *     stop          → stop.ts
- *   Note: Codex CLI has fewer native hook events than Claude Code. ECC currently
- *   supports native session_start + stop, plus a partial pre_tool_use bridge.
- *   There is no native UserPromptSubmit, PostToolUse, or PreCompact parity yet.
+ *     session_start → codex-sessionstart.mjs
+ *     pre_tool_use  → codex-pretooluse.mjs (polls Codex transcript for exact events)
+ *     stop          → codex-stop.ts
+ *   Note: Codex CLI's native hook surface is narrower than Claude/Gemini. ECC
+ *   uses the available Codex hooks plus Codex's persisted session transcript to
+ *   recover exact user_prompt_submit and post_tool_use events without fabricating
+ *   outcomes.
  * Depends on: src/adapters/detect.ts, src/adapters/local-config.ts.
  * Depended on by: src/adapters/index.ts.
  */
@@ -77,8 +78,8 @@ export class CodexCliAdapter implements AssistantAdapter {
   readonly name = "Codex CLI";
   readonly capabilities = {
     session_start: "native",
-    user_prompt_submit: "synthesized",
-    post_tool_use: "unsupported",
+    user_prompt_submit: "transcript",
+    post_tool_use: "transcript",
     pre_compact: "synthesized",
     stop: "native",
   } as const;

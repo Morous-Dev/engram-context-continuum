@@ -35,7 +35,7 @@ It operates as session middleware: lifecycle hooks capture events while the AI w
 a local SLM synthesizes memory offline at session end, and an MCP server serves the
 pre-digested context on demand to any connected assistant.
 
-Supported assistants: Claude Code, Gemini CLI, VS Code Copilot, Codex CLI, OpenCode, Cursor. Codex CLI currently has partial hook coverage plus MCP.
+Supported assistants: Claude Code, Gemini CLI, VS Code Copilot, Codex CLI, Kilo CLI, OpenCode, Cursor. Codex CLI currently uses native `session_start` / `pre_tool_use` / `stop` hooks plus an exact transcript bridge for prompt and tool-result capture. Because Codex lacks a true prompt-submit injection hook, session start also injects a Codex-specific turn policy that steers pure chat turns toward EngramCC MCP memory when prior context matters. Kilo CLI is currently verified only for MCP plus the `ekilo` wrapper flow; native Kilo lifecycle hooks remain unverified.
 
 ## 2. Priority Order
 
@@ -69,6 +69,21 @@ When facts conflict, use:
     YAML, updates knowledge graph, bulk-embeds up to 50 high-value events to vector store
 - **Adapter setup** — `setup.ts` generates project-local hook + MCP snippets under
   `.engram-cc/assistant-configs/`. No user-home config is mutated.
+- **Canonical npm MCP launch** — assistants that self-install EngramCC from npm
+  should use `npx --yes --package=@morous-dev/engram-cc -- engramcc-mcp`
+  (or the equivalent `npm exec` form). Do not guess `npx @morous-dev/engram-cc mcp`.
+- **Generated local MCP snippets** — adapter-generated files under
+  `.engram-cc/assistant-configs/` intentionally point to the local built server via
+  `node <packageRoot>/build/mcp/server.js`. That is distinct from the canonical npm
+  self-install command above.
+- **Codex transcript bridge** — exact Codex prompt/tool recovery reads Codex's own
+  session JSONL under `CODEX_HOME` / `~/.codex/sessions/`, but ECC still writes only
+  into the project-local `.engram-cc/` tree.
+- **Codex turn guidance** — startup injection tells Codex to consult EngramCC MCP
+  memory on user turns when earlier context is missing from the visible turn state.
+- **Kilo support level** — verified support is MCP plus the `ekilo` wrapper for
+  session-start / session-stop continuity. Do not claim native Kilo hook parity until
+  Kilo ships documented lifecycle hooks.
 - **SLM pipeline** — used for: compress() in precompact, embed() for vector store,
   working_context and headline synthesis in stop hook. Zero API calls for ECC processing.
 - **Tiered injection** (sessionstart.mjs):
@@ -119,7 +134,8 @@ When facts conflict, use:
 - `src/adapters/claude-code.ts` — Claude Code hooks + MCP registration
 - `src/adapters/gemini-cli.ts` — Gemini CLI hooks + MCP registration
 - `src/adapters/vscode-copilot.ts` — VS Code Copilot MCP registration
-- `src/adapters/codex-cli.ts` — Codex CLI partial hook + MCP registration
+- `src/adapters/codex-cli.ts` — Codex CLI hook + transcript bridge + MCP registration
+- `src/adapters/kilo-cli.ts` — Kilo CLI MCP + wrapper-note registration
 - `src/adapters/opencode.ts` — OpenCode hooks + MCP registration
 - `src/adapters/cursor.ts` — Cursor MCP registration
 
@@ -233,8 +249,10 @@ Disable subconscious retrieval + live indexing: `ENGRAM_SUBCONSCIOUS=0`
   `src/hooks/assistant-startup.mjs` with legacy Claude env fallback preserved.
   Windows hook commands now route through `src/hooks/hook-runner.mjs` to avoid
   nested `cmd /C` quoting failures on spaced paths. Remaining portability debt is
-  mainly capability parity, not core pathing/extraction: Codex remains partial hooks
-  plus MCP, and startup capture is currently Claude-only by design.
+  mainly capability parity, not core pathing/extraction: Codex still lacks a native compact hook,
+  but prompt/tool capture now runs through the exact transcript bridge rather than inferred payloads.
+  Startup capture is
+  currently Claude-only by design.
 - **tier3c (Gemma 3 4B) times out at 12+ compaction cycles** — The 60s SLM timeout fires during
   marathon sessions. Gemma 3 4B is slower than Llama 3.2 3B at this task; at 12–20 cycle inputs
   it exceeds the budget and PreCompact falls back to raw context. Gemma 3 4B is still viable for

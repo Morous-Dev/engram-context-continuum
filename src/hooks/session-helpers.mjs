@@ -110,6 +110,11 @@ export function getProjectLogsDir(opts = {}) {
  * @returns Promise resolving to the full stdin content as a UTF-8 string.
  */
 export function readStdin() {
+  const cached = process.env.ENGRAM_HOOK_INPUT_JSON;
+  if (typeof cached === "string") {
+    return Promise.resolve(cached);
+  }
+
   return new Promise((resolve, reject) => {
     let data = "";
     process.stdin.setEncoding("utf-8");

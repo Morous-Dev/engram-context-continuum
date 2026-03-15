@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * setup.ts — CLI installer entry point for EngramCC.
  *
@@ -292,6 +293,20 @@ async function resolveModelsDir(args: string[], projectRoot: string, skipPrompts
  */
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+  const subcommand = args[0];
+
+  if (subcommand === "mcp") {
+    const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
+    const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+    const { execSync } = await import("node:child_process");
+    const { fileURLToPath } = await import("node:url");
+    const { dirname, join } = await import("node:path");
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const serverPath = join(__dirname, "..", "mcp", "server.js");
+    execSync(`node "${serverPath}"`, { stdio: "inherit" });
+    return;
+  }
+
   const skipPrompts = args.includes("--yes") || !process.stdin.isTTY;
   const skipModel   = args.includes("--no-model");
   const tierOverride = args.find(a => a.startsWith("--tier="))?.split("=")[1] as CompressionTier | undefined;

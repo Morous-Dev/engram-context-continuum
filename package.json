@@ -1,6 +1,6 @@
 {
   "name": "@morous-dev/engram-cc",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "mcpName": "io.github.Morous-Dev/engram-cc",
   "type": "module",
   "description": "Engram Context Continuum (EngramCC) — universal AI coding assistant memory: session handoff, multi-tier memory bank, smart compaction, and bundled AI compression. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, Codex CLI, and Cursor.",
@@ -11,11 +11,16 @@
   "license": "AGPL-3.0-only",
   "author": "Morous-Dev",
   "bin": {
-    "engramcc": "build/cli/setup.js"
+    "engram-cc": "build/cli/setup.js",
+    "engramcc": "build/cli/setup.js",
+    "engramcc-mcp": "build/mcp/server.js",
+    "engram-cc-mcp": "build/mcp/server.js",
+    "ekilo": "ekilo.js"
   },
   "files": [
     "build/",
     "src/hooks/",
+    "ekilo.js",
     "plugin-config.yaml",
     "README.md"
   ],
@@ -24,8 +29,10 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf build",
     "setup": "npm run build && node build/cli/setup.js",
+    "kilo": "node ekilo.js",
     "postinstall": "node -e \"console.log('EngramCC postinstall: skipped automatic setup. Run engramcc inside your project folder to initialize local .engram-cc/.')\"",
-    "test": "node benchmark/test-session-db.mjs && node benchmark/test-extract.mjs && node benchmark/test-snapshot.mjs && node benchmark/test-fts5.mjs && node benchmark/test-hook-portability.mjs",
+    "test": "node benchmark/test-session-db.mjs && node benchmark/test-extract.mjs && node benchmark/test-snapshot.mjs && node benchmark/test-fts5.mjs && node benchmark/test-hook-portability.mjs && node benchmark/test-codex-adapter.mjs && node benchmark/test-kilo-adapter.mjs",
+    "test:codex": "node benchmark/test-codex-adapter.mjs",
     "test:quality": "node benchmark/run.mjs",
     "test:lifetime": "node benchmark/test-lifetime-retention.mjs",
     "test:calibrate": "node benchmark/test-extract-real-decisions.mjs",
@@ -51,6 +58,7 @@
     "gemini-cli",
     "vscode-copilot",
     "opencode",
+    "kilocode",
     "codex",
     "cursor",
     "ai-coding-assistant",

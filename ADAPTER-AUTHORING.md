@@ -28,7 +28,7 @@ What is already clean:
 
 What is still legacy-biased:
 - `src/hooks/assistant-startup.mjs` currently contains only Claude-specific startup capture
-- hook capability parity is still uneven (Codex is partial hooks + MCP)
+- hook capability parity is still uneven (Codex still lacks a native compact hook)
 
 So the rule is: new adapters should plug into the normalized adapter surface, not copy Claude-specific assumptions deeper into the system.
 
@@ -40,6 +40,7 @@ For a new CLI assistant, these are the normal files to add or edit:
 2. Register it in `src/adapters/index.ts`
 3. Declare capability tiers in `src/adapters/types.ts` terms:
    - `native`
+   - `transcript`
    - `synthesized`
    - `unsupported`
 4. Generate project-local snippets via `src/adapters/local-config.ts`
@@ -69,6 +70,9 @@ Capability labels must be honest.
 
 - `native`
   The assistant exposes a real lifecycle event with enough payload to support ECC directly.
+- `transcript`
+  The assistant does not expose the lifecycle event as a hook, but it persists an exact transcript
+  that ECC can consume without inventing state.
 - `synthesized`
   ECC infers the lifecycle event from another assistant event or partial payload.
 - `unsupported`
@@ -79,8 +83,9 @@ Do not mark speculative behavior as `synthesized` if it materially invents state
 Low-fidelity fake events are worse than missing events.
 
 Examples:
-- Codex `post_tool_use` is currently `unsupported`, not synthesized, because we do not get a reliable real tool-result payload.
+- Codex `user_prompt_submit` and `post_tool_use` are `transcript`, not `synthesized`, because ECC reads them from Codex's persisted session JSONL rather than guessing from the pre-tool payload.
 - Cursor and VS Code Copilot are MCP-only today, so hook capabilities stay `unsupported`.
+- Kilo is `unsupported` for native hooks today; the supported path is MCP plus the `ekilo` wrapper. Do not infer OpenCode-compatible hooks without primary-source proof.
 
 ## What You May Touch
 
@@ -91,7 +96,7 @@ These are normal adapter-authoring touch points:
 - `src/adapters/types.ts`
 - `src/adapters/local-config.ts`
 - assistant-specific hook wrappers under `src/hooks/`
-- assistant-specific translation helpers such as `src/adapters/codex-plug.ts`
+- assistant-specific bridge/policy helpers such as `src/adapters/codex-transcript.ts` and `src/adapters/codex-plug.ts`
 - assistant-specific tests under `benchmark/`
 - docs that describe support and limitations
 

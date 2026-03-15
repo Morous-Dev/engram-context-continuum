@@ -53,7 +53,6 @@ bun.lock
 
 # Personal Claude skills and session state
 .claude/Skills/
-.claude/super-context/
 
 # Local databases and runtime artifacts
 *.db

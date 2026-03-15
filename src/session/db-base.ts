@@ -1,5 +1,5 @@
 /**
- * db-base.ts — Reusable SQLite infrastructure for the super-context plugin.
+ * db-base.ts — Reusable SQLite infrastructure for the engram-cc plugin.
  *
  * Responsible for: lazy-loading better-sqlite3, applying WAL pragmas, defining
  * the PreparedStatement interface, providing DB file cleanup helpers, and

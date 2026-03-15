@@ -1,0 +1,10 @@
+{
+  "$schema": "https://kilo.ai/config.json",
+  "mcp": {
+    "engram-cc": {
+      "type": "local",
+      "command": ["npx", "--yes", "--package=@morous-dev/engram-cc", "--", "engramcc-mcp"],
+      "enabled": true
+    }
+  }
+}

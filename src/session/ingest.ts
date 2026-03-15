@@ -313,7 +313,7 @@ export async function ingestEvent(event: ECCIngestEvent): Promise<IngestResult> 
           const dbPath = getProjectDBPath(event.project_dir);
           const shouldLiveIndex =
             event.payload.kind === "post_tool_use" &&
-            event.source_kind === "native_hook" &&
+            (event.source_kind === "native_hook" || event.source_kind === "transcript") &&
             event.confidence === "exact" &&
             extracted.length > 0;
 

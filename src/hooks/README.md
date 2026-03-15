@@ -54,6 +54,7 @@ Stop              → stop.ts                → HandoffWriter + GraphDB + Vecto
 | `sessionstart.mjs` | Injects resume + engrams + handoff + working memory into context. |
 | `userpromptsubmit.mjs` | Prompt capture + signal extraction + semantic memory retrieval. |
 | `stop.ts` | Full session teardown pipeline. Compiled to build/hooks/stop.js. |
+| `kilo-sessionstart.mjs` | Kilo-specific SessionStart hook. Writes `.engram-cc/kilo-context.md` for Kilo to load. |
 
 ## Semantic retrieval (UserPromptSubmit)
 
@@ -129,3 +130,74 @@ on CPU) so there is no contention.
 |----------|-----------|---------|
 | `<projectDir>/.engram-cc/logs/precompact-debug.log` | precompact.mjs | SLM brief results, engram retrieval stats, hardware profile, errors |
 | `<projectDir>/.engram-cc/logs/sessionstart-debug.log` | sessionstart.mjs | Session start errors |
+
+## Kilo CLI Integration
+
+Kilo does not currently expose verified native lifecycle hooks, so ECC supports it via
+MCP plus the `ekilo` wrapper:
+
+1. **`kilo-sessionstart.mjs`** — Runs before Kilo starts, reads `handoff.yaml` +
+   `working.yaml`, and writes `.engram-cc/kilo-context.md`.
+
+2. **`build/hooks/stop.js`** — Runs after Kilo exits and writes the normal ECC handoff
+   and memory artifacts.
+
+### Setup
+
+Configure Kilo to load the context file by adding to your Kilo config:
+
+**Project-level** (`.kilocode/opencode.json` or `./opencode.json`):
+```json
+{
+  "instructions": [".engram-cc/kilo-context.md"]
+}
+```
+
+**Global** (`~/.config/kilo/opencode.json`):
+```json
+{
+  "instructions": ["~/.engram-cc/kilo-context.md"]
+}
+```
+
+### Running the Kilo hooks
+
+Use the **`ekilo`** wrapper (recommended):
+
+```bash
+# Install as a global npm link (optional)
+npm link
+
+# Or run directly
+node ekilo.js
+
+# Continue previous session
+ekilo --continue
+
+# New fresh session
+ekilo --new
+
+# Run in autonomous mode with a prompt
+ekilo "Fix the authentication bug"
+```
+
+The wrapper automatically:
+1. Runs `kilo-sessionstart.mjs` to load context from `.engram-cc/`
+2. Ensures `.kilocode/opencode.json` points Kilo MCP at the local EngramCC server and loads `.engram-cc/kilo-context.md`
+3. Launches Kilo
+4. Runs `build/hooks/stop.js` to save context when Kilo exits
+
+### Manual setup (without wrapper)
+
+If you prefer not to use the wrapper, you can run the supported wrapper steps manually:
+
+```bash
+# Session start (before running kilo)
+node src/hooks/kilo-sessionstart.mjs
+
+# Run kilo
+kilo
+
+# Session end (after exiting kilo)
+node build/hooks/stop.js
+```
