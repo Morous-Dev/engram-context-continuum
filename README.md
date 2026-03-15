@@ -415,3 +415,9 @@ src/
 **Open source:** [AGPL-3.0](LICENSE) — free to use, modify, and distribute as long as derivative works are also open source under AGPL-3.0.
 
 **Commercial:** A proprietary license is available for teams that need to use EngramCC in closed-source products or hosted services without AGPL obligations. See [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) for details.
+
+---
+
+## Support
+
+If EngramCC saves you time, [support the project](https://morous-dev.lemonsqueezy.com/checkout/buy/d10e8ab1-7616-433b-9c69-4ccb13edbdc0) — pay what you want, starting at $5.
